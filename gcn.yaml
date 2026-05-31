@@ -1,0 +1,59 @@
+gcn:
+  cora:
+    dataset: cora
+    root: ./data
+    mode: full
+    gpu_id: auto
+    num_layers: 2
+    dropout: 0.5
+    supervised_epochs: 200
+    supervised_lr: 0.01
+    supervised_weight_decay: 0.0005
+    supervised_early_stop: false
+    supervised_eval_every: 5
+    supervised_patience: 20
+    supervised_min_delta: 0.0001
+  arxiv:
+    dataset: arxiv
+    root: ./data
+    mode: neighbor
+    gpu_id: auto
+    num_layers: 2
+    dropout: 0.5
+    supervised_epochs: 200
+    supervised_lr: 0.01
+    supervised_weight_decay: 0.0005
+    supervised_early_stop: false
+    supervised_eval_every: 5
+    supervised_patience: 20
+    supervised_min_delta: 0.0001
+    batch_size: 1024
+    num_neighbors:
+      - 15
+      - 10
+    eval_batch_size: 4096
+    eval_num_neighbors:
+      - -1
+      - -1
+  products:
+    dataset: products
+    root: ./data
+    mode: neighbor
+    gpu_id: auto
+    num_layers: 2
+    dropout: 0.5
+    supervised_epochs: 200
+    supervised_lr: 0.01
+    supervised_weight_decay: 0.0005
+    supervised_early_stop: false
+    supervised_eval_every: 5
+    supervised_patience: 20
+    supervised_min_delta: 0.0001
+    batch_size: 1024
+    num_neighbors:
+      - 15
+      - 10
+    eval_batch_size: 4096
+    eval_num_neighbors:
+      - -1
+      - -1
