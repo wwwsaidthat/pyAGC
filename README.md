@@ -2,16 +2,16 @@
 
 PyAGC 是一个基于 PyTorch 与 PyTorch Geometric 的属性图聚类与图表示学习项目，既提供可复用的 Python 包，也包含一套面向实验的统一训练脚本。当前仓库已经上传了代码与配置文件，体积较大的数据文件默认不纳入 Git 管理，需要在本地自行准备。
 
-## 项目概览
+## 📌 Overview
 
 - 提供 `pyagc` 包，覆盖图聚类、图表示学习、数据加载、增强、指标与工具模块。
 - 提供统一训练入口 `train_unified_methods.py`，支持监督式 GCN、DGI、CCA-SSG、GRACE 及其 MRL 版本。
 - 内置多个实验配置文件，如 `gcn.yaml`、`dgi.yaml`、`ccassg.yaml`、`grace.yaml`。
 - 支持 `Cora`、`ogbn-arxiv`、`ogbn-products`、`reddit2` 等图数据集的本地加载。
 
-## 主要功能
+## ✨ Features
 
-### 1. 核心包 `pyagc`
+### 1. 📦 Core Package `pyagc`
 
 - `pyagc.models`
   - 包含 `DGI`、`DMoN`、`MinCut`、`Neuromap`、`GBT`、`CCASSG`、`NS4GC`、`SAGSC`、`SGC`、`SSGC`
@@ -31,7 +31,7 @@ PyAGC 是一个基于 PyTorch 与 PyTorch Geometric 的属性图聚类与图表�
 - `pyagc.utils`
   - checkpoint 与通用辅助函数
 
-### 2. 统一训练脚本
+### 2. 🚀 Unified Training Script
 
 `train_unified_methods.py` 当前支持以下方法：
 
@@ -51,7 +51,7 @@ PyAGC 是一个基于 PyTorch 与 PyTorch Geometric 的属性图聚类与图表�
 - 支持早停、日志输出、结果摘要导出
 - 为 PyTorch 2.6+ 的 PyG 序列化限制做了兼容处理
 
-## 项目结构
+## 🗂️ Structure
 
 ```text
 pyAGC/
@@ -72,7 +72,7 @@ pyAGC/
 └── grace.yaml
 ```
 
-## 环境要求
+## 🧰 Environment
 
 - Python `>= 3.10`
 - `torch`
@@ -85,18 +85,18 @@ pyAGC/
 - `pyyaml`
 - `ogb`
 
-## 安装方式
+## 🔧 Installation
 
 建议先按你的 CUDA/CPU 环境安装匹配版本的 `torch` 与 `torch-geometric`，再安装项目本身。
 
-### 1. 克隆仓库
+### 1. 📥 Clone Repository
 
 ```bash
 git clone https://github.com/wwwsaidthat/pyAGC.git
 cd pyAGC
 ```
 
-### 2. 创建环境
+### 2. 🐍 Create Environment
 
 ```bash
 python -m venv .venv
@@ -104,7 +104,7 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 ```
 
-### 3. 安装依赖与项目
+### 3. 📚 Install Dependencies
 
 ```bash
 pip install torch
@@ -118,7 +118,7 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
-## 数据准备
+## 🗃️ Dataset
 
 当前仓库默认忽略根目录下的 `data/`，因此运行前需要手动准备本地数据集目录。统一训练脚本不会主动为你下载数据，而是直接检查本地目录是否存在。
 
@@ -145,9 +145,9 @@ data/
 - `products` -> `data/ogbn_products`
 - `reddit2` -> `data/reddit2` 或 `data/reddit`
 
-## 快速开始
+## ⚡ Quick Start
 
-### 1. 作为 Python 包导入
+### 1. 🧩 Import As A Python Package
 
 ```python
 import pyagc
@@ -156,7 +156,7 @@ from pyagc.models import DGI, CCASSG, DMoN
 from unified_methods import GRACEMethod
 ```
 
-### 2. 运行统一训练脚本
+### 2. ▶️ Run Unified Training
 
 监督式 GCN：
 
@@ -192,7 +192,7 @@ python train_unified_methods.py \
   --gpu-id auto
 ```
 
-### 3. 常用参数
+### 3. 🛠️ Common Arguments
 
 - `--method`: `gcn`、`dgi`、`ccassg`、`grace`、`dgi_mrl`、`ccassg_mrl`、`grace_mrl`
 - `--dataset`: `cora`、`arxiv`、`reddit2`、`products`
@@ -205,7 +205,7 @@ python train_unified_methods.py \
 - `--eval-batch-size`: 评估批大小
 - `--mrl-dims`: MRL 输出维度列表
 
-## 输出目录
+## 📤 Outputs
 
 运行统一训练脚本后，结果默认保存在以下目录：
 
@@ -221,7 +221,7 @@ python train_unified_methods.py \
 - `accuracy_summary.txt`
 - `run.log`
 
-## 配置文件
+## ⚙️ Config
 
 仓库内提供的 YAML 配置文件可作为不同方法的实验参考：
 
@@ -238,13 +238,13 @@ python train_unified_methods.py \
 - 数据集特定超参数
 - 对比学习增强参数
 
-## 注意事项
+## 📝 Notes
 
 - 根目录 `data/` 当前未上传到仓库，需要你在本地自行准备。
 - `.DS_Store`、`__pycache__/`、`*.pyc` 已加入忽略规则，不会提交到 Git。
 - `pyproject.toml` 中保留了项目元信息与依赖定义，可直接用于 `pip install -e .`。
 - 如果使用 `ogbn-products` 等大规模数据集，建议优先使用 `neighbor` 模式并合理设置 `batch-size`。
 
-## License
+## 📄 License
 
 本项目在 `pyproject.toml` 中声明为 MIT License。
