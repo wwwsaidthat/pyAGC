@@ -126,3 +126,21 @@ Products:
   p_ed1: 0.5
   p_fm2: 0.
   p_ed2: 0.5
+
+
+MAG:
+  mini_batch: true
+  gnn_type: gcn
+  force_full_batch_inference: true
+  allow_cpu_fallback: true
+  epochs: 50
+  lr: 0.001
+  wd: 0.0
+  hidden_channels: 512
+  num_layers: 2
+  norm: batch_norm
+  lam: 0.001
+  p_fm1: 0.
+  p_ed1: 0.5
+  p_fm2: 0.
+  p_ed2: 0.5

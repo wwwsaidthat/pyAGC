@@ -24,10 +24,16 @@ class DGIWithMRLMethod(DGIMethod):
             raise ValueError("mrl_dims 中所有维度必须 > 0")
         self.mrl_dims = dims
         self.mrl_weight = float(mrl_weight)
+        if self.hidden_dim < int(max(self.mrl_dims)):
+            raise ValueError(
+                f"DGI+MRL 需要 --hidden-dim >= max(mrl_dims)={max(self.mrl_dims)}, "
+                f"因为下游评估使用 encoder 输出（dim={self.hidden_dim}）切片, "
+                f"当前 hidden-dim={self.hidden_dim} 不足"
+            )
         self.last_mrl_dim_losses: Dict[str, float] = {}
 
     def output_dim(self) -> int:
-        return int(max(self.mrl_dims))
+        return self.hidden_dim
 
     def _dgi_prefix_loss_with_details(self, pos_z_full: Tensor, neg_z_full: Tensor) -> Tensor:
         w = self.model.weight

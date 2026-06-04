@@ -31,8 +31,6 @@ from unified_methods import (
     GRACEMethod,
     GRACEWithMRLMethod,
     GRACEWithMRLMutualLearningMethod,
-    GRACEWithMRLMutualLearningMethodV2,
-    GRACEWithMRLMutualLearningMethodV3,
     SupervisedGCNMethod,
 )
 
@@ -241,6 +239,8 @@ def ensure_local_dataset_ready(dataset: str, root: str) -> None:
         _assert_dir_non_empty(root_path / "ogbn_arxiv", "ogbn-arxiv 数据目录")
     elif dataset == "products":
         _assert_dir_non_empty(root_path / "ogbn_products", "ogbn-products 数据目录")
+    elif dataset == "mag":
+        _assert_dir_non_empty(root_path / "ogbn_mag", "ogbn-mag 数据目录")
     elif dataset == "reddit2":
         # 兼容 data/reddit2 和 data/reddit 两种目录。
         d1 = root_path / "reddit2"
@@ -261,6 +261,11 @@ def load_dataset(dataset: str, root: str, logger: logging.Logger) -> DatasetBund
         root=root,
         return_splits=True,
     )
+    # OGB 数据集（arxiv/mag/products）的特征未经 T.NormalizeFeatures 处理，
+    # 对依赖余弦相似度的对比学习方法（GRACE/DGI/CCA-SSG），
+    # 行归一化能显著提升训练稳定性。
+    if dataset in ("arxiv", "mag", "products"):
+        x = torch.nn.functional.normalize(x, p=2, dim=1)
     data = Data(x=x, edge_index=edge_index, y=y.long())
     num_classes = int(data.y.max().item()) + 1
     n = data.num_nodes
@@ -521,40 +526,6 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             mrl_weight=args.mrl_weight,
             ml_weight=args.ml_weight,
             verbose=True,  # 默认开启 verbose 模式打印损失
-        )
-    if args.method == "grace_ml2":
-        return GRACEWithMRLMutualLearningMethodV2(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            proj_dim=args.proj_dim,
-            tau=args.tau,
-            p_feat_mask_1=args.p_feat_mask_1,
-            p_edge_drop_1=args.p_edge_drop_1,
-            p_feat_mask_2=args.p_feat_mask_2,
-            p_edge_drop_2=args.p_edge_drop_2,
-            mrl_dims=mrl_dims,
-            mrl_weight=args.mrl_weight,
-            ml_weight=args.ml_weight,
-            verbose=True,
-        )
-    if args.method == "grace_ml3":
-        return GRACEWithMRLMutualLearningMethodV3(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            proj_dim=args.proj_dim,
-            tau=args.tau,
-            p_feat_mask_1=args.p_feat_mask_1,
-            p_edge_drop_1=args.p_edge_drop_1,
-            p_feat_mask_2=args.p_feat_mask_2,
-            p_edge_drop_2=args.p_edge_drop_2,
-            mrl_dims=mrl_dims,
-            mrl_weight=args.mrl_weight,
-            ml_weight=args.ml_weight,
-            verbose=True,
         )
     raise ValueError(f"未知方法: {args.method}")
 
@@ -1043,11 +1014,9 @@ def parse_args() -> argparse.Namespace:
             "ccassg_mrl",
             "grace_mrl",
             "grace_ml",
-            "grace_ml2",
-            "grace_ml3",
         ],
     )
-    p.add_argument("--dataset", type=str, required=True, choices=["cora", "arxiv", "reddit2", "products"])
+    p.add_argument("--dataset", type=str, required=True, choices=["cora", "arxiv", "reddit2", "products", "mag"])
     p.add_argument("--root", type=str, default="./data")
     p.add_argument("--mode", type=str, default="auto", choices=["auto", "full", "neighbor"])
     p.add_argument("--gpu-id", type=str, default="auto", help="auto/cpu/0/1...")

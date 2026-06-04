@@ -31,10 +31,16 @@ class GRACEWithMRLMethod(GRACEMethod):
                 proj_out = int(last.out_features)
         if proj_out is not None and proj_out < max_dim:
             raise ValueError(f"GRACE+MRL 需要 --proj-dim >= max(mrl_dims)={max_dim}, 但当前 proj-dim={proj_out}")
+        if self.hidden_dim < max_dim:
+            raise ValueError(
+                f"GRACE+MRL 需要 --hidden-dim >= max(mrl_dims)={max_dim}, "
+                f"因为下游评估使用 encoder 输出（dim={self.hidden_dim}）切片, "
+                f"当前 hidden-dim={self.hidden_dim} 不足"
+            )
         self.last_mrl_dim_losses: Dict[str, float] = {}
 
     def output_dim(self) -> int:
-        return int(max(self.mrl_dims))
+        return self.hidden_dim
 
     def _grace_prefix_loss_with_details(self, z1_full: Tensor, z2_full: Tensor) -> Tuple[Tensor, Dict[str, float]]:
         dim_losses: Dict[str, float] = {}
@@ -109,8 +115,7 @@ class GRACEWithMRLMethod(GRACEMethod):
     def infer_embeddings(self, data: Data, mode: str, device: torch.device, eval_num_neighbors: Sequence[int], eval_batch_size: int) -> Tensor:
         self.eval()
         if mode == "full":
-            h = self.model.embed(data.x.to(device), data.edge_index.to(device))
-            return self.model.projector(h).cpu()
+            return self.model.embed(data.x.to(device), data.edge_index.to(device)).cpu()
         loader = NeighborLoader(
             data,
             input_nodes=None,
@@ -122,7 +127,7 @@ class GRACEWithMRLMethod(GRACEMethod):
         for batch in loader:
             batch = batch.to(device)
             h = self.model.embed(batch.x, batch.edge_index)[: batch.batch_size]
-            out.append(self.model.projector(h).cpu())
+            out.append(h.cpu())
         return torch.cat(out, dim=0)
 
     def get_last_mrl_dim_losses(self) -> Dict[str, float]:

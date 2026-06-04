@@ -99,3 +99,12 @@ Products:
   allow_cpu_fallback: true
   norm: batch_norm
 
+MAG:
+  mini_batch: false
+  gnn_type: gcn
+  force_full_batch_inference: true
+  allow_cpu_fallback: true
+  epochs: 300
+  hidden_channels: 160
+  num_layers: 3
+  norm: null

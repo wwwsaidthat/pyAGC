@@ -29,7 +29,7 @@ class DGIMethod(BaseMethod):
             in_channels=in_dim,
             hidden_channels=hidden_dim,
             out_channels=hidden_dim,
-            num_layers=1,
+            num_layers=num_layers,
             dropout=dropout,
             act=nn.PReLU(),
             act_last=True,

@@ -23,10 +23,16 @@ class CCASSGWithMRLMethod(CCASSGMethod):
         if any(d <= 0 for d in self.mrl_dims):
             raise ValueError("mrl_dims 中所有维度必须 > 0")
         self.mrl_weight = float(mrl_weight)
+        if self.hidden_dim < int(max(self.mrl_dims)):
+            raise ValueError(
+                f"CCA-SSG+MRL 需要 --hidden-dim >= max(mrl_dims)={max(self.mrl_dims)}, "
+                f"因为下游评估使用 encoder 输出（dim={self.hidden_dim}）切片, "
+                f"当前 hidden-dim={self.hidden_dim} 不足"
+            )
         self.last_mrl_dim_losses: Dict[str, float] = {}
 
     def output_dim(self) -> int:
-        return int(max(self.mrl_dims))
+        return self.hidden_dim
 
     def _ccassg_mrl_loss(self, z1_full: Tensor, z2_full: Tensor) -> Tensor:
         losses = []
