@@ -132,6 +132,4 @@ Products:
   p_ed1: 0.5
   p_fm2: 0.
   p_ed2: 0.5
-  kmeans_n_init: 10
-  kmeans_max_iter: 300
 

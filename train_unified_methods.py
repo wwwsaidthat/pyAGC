@@ -30,6 +30,9 @@ from unified_methods import (
     DGIWithMRLMethod,
     GRACEMethod,
     GRACEWithMRLMethod,
+    GRACEWithMRLMutualLearningMethod,
+    GRACEWithMRLMutualLearningMethodV2,
+    GRACEWithMRLMutualLearningMethodV3,
     SupervisedGCNMethod,
 )
 
@@ -502,6 +505,57 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             mrl_dims=mrl_dims,
             mrl_weight=args.mrl_weight,
         )
+    if args.method == "grace_ml":
+        return GRACEWithMRLMutualLearningMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            proj_dim=args.proj_dim,
+            tau=args.tau,
+            p_feat_mask_1=args.p_feat_mask_1,
+            p_edge_drop_1=args.p_edge_drop_1,
+            p_feat_mask_2=args.p_feat_mask_2,
+            p_edge_drop_2=args.p_edge_drop_2,
+            mrl_dims=mrl_dims,
+            mrl_weight=args.mrl_weight,
+            ml_weight=args.ml_weight,
+            verbose=True,  # 默认开启 verbose 模式打印损失
+        )
+    if args.method == "grace_ml2":
+        return GRACEWithMRLMutualLearningMethodV2(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            proj_dim=args.proj_dim,
+            tau=args.tau,
+            p_feat_mask_1=args.p_feat_mask_1,
+            p_edge_drop_1=args.p_edge_drop_1,
+            p_feat_mask_2=args.p_feat_mask_2,
+            p_edge_drop_2=args.p_edge_drop_2,
+            mrl_dims=mrl_dims,
+            mrl_weight=args.mrl_weight,
+            ml_weight=args.ml_weight,
+            verbose=True,
+        )
+    if args.method == "grace_ml3":
+        return GRACEWithMRLMutualLearningMethodV3(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            proj_dim=args.proj_dim,
+            tau=args.tau,
+            p_feat_mask_1=args.p_feat_mask_1,
+            p_edge_drop_1=args.p_edge_drop_1,
+            p_feat_mask_2=args.p_feat_mask_2,
+            p_edge_drop_2=args.p_edge_drop_2,
+            mrl_dims=mrl_dims,
+            mrl_weight=args.mrl_weight,
+            ml_weight=args.ml_weight,
+            verbose=True,
+        )
     raise ValueError(f"未知方法: {args.method}")
 
 
@@ -688,6 +742,10 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
         ssl_stop_epoch = 0
         ssl_patience_left = int(args.pretrain_patience)
         for ep in range(1, args.pretrain_epochs + 1):
+            # 更新 epoch（用于 verbose 模式打印）
+            if hasattr(method, "epoch"):
+                method.epoch = ep
+            
             if mode == "full":
                 loss = method.ssl_train_step_full(data, device, optimizer)
             else:
@@ -984,6 +1042,9 @@ def parse_args() -> argparse.Namespace:
             "dgi_mrl",
             "ccassg_mrl",
             "grace_mrl",
+            "grace_ml",
+            "grace_ml2",
+            "grace_ml3",
         ],
     )
     p.add_argument("--dataset", type=str, required=True, choices=["cora", "arxiv", "reddit2", "products"])
@@ -1036,6 +1097,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mrl-dims", type=str, default="64,128,256,512", help="MRL 维度列表（逗号分隔）")
     p.add_argument("--mrl-tau", type=float, default=0.5)
     p.add_argument("--mrl-weight", type=float, default=1.0)
+    p.add_argument("--ml-weight", type=float, default=5.0, help="互学习损失权重")
 
     p.add_argument("--output-dir", type=str, default="./results")
     p.add_argument("--log-level", type=str, default="INFO")
