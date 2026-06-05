@@ -33,6 +33,7 @@ class DGIMethod(BaseMethod):
             dropout=dropout,
             act=nn.PReLU(),
             act_last=True,
+            norm="batch_norm",
         )
         self.model = DGI(hidden_channels=hidden_dim, encoder=encoder)
         self.hidden_dim = hidden_dim

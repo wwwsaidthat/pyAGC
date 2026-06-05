@@ -38,6 +38,7 @@ class GRACECore(nn.Module):
             out_channels=hidden_dim,
             num_layers=num_layers,
             dropout=dropout,
+            norm="batch_norm",
         )
         self.projector = nn.Sequential(
             nn.Linear(hidden_dim, proj_dim),

@@ -36,6 +36,7 @@ class CCASSGMethod(BaseMethod):
             out_channels=hidden_dim,
             num_layers=num_layers,
             dropout=dropout,
+            norm="batch_norm",
         )
         t1 = GSSLTransform(
             p_feat_mask=p_feat_mask_1,

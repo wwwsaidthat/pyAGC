@@ -24,6 +24,7 @@ class SupervisedGCNMethod(BaseMethod):
             out_channels=hidden_dim,
             num_layers=num_layers,
             dropout=dropout,
+            norm="batch_norm",
         )
         self.classifier = nn.Linear(hidden_dim, num_classes)
         self.criterion = nn.CrossEntropyLoss()
