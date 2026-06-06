@@ -1131,6 +1131,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pca-dims", type=str, default=None,
                    help="PCA基线：逗号分隔的目标维度，例如 32,64,128。训练hidden_dim后PCA降维并评估每维度5次")
 
+    p.add_argument("--eval-only", action="store_true",
+                   help="仅评估模式：跳过训练，直接从 --checkpoint 加载模型进行PCA/标准评估")
+    p.add_argument("--checkpoint", type=str, default=None,
+                   help="eval-only 模式下使用的 checkpoint 路径")
+
     p.add_argument("--output-dir", type=str, default="./results")
     p.add_argument("--log-level", type=str, default="INFO")
     return p.parse_args()
@@ -1140,20 +1145,36 @@ def main() -> None:
     """程序入口。"""
     try:
         args = parse_args()
-        ckpt_dir, result_dir = build_run_dirs(args)
-        logger = setup_logger(args.log_level, log_file=result_dir / "run.log")
         enable_torch26_compat()
-        bundle = load_dataset(args.dataset, args.root, logger)
+        bundle = load_dataset(args.dataset, args.root, logger=None)  # logger 尚未初始化，先 None
 
         train_seed = 0
         eval_seeds = [0, 1, 2, 3, 4]
-        logger.info("CheckpointDir=%s", str(ckpt_dir))
-        logger.info("ResultDir=%s", str(result_dir))
-        logger.info("方法=%s | 数据集=%s | train_seed=%d | eval_seeds=%s", args.method, args.dataset, int(train_seed), eval_seeds)
-        dump_run_config(ckpt_dir, args=args, train_seed=int(train_seed), eval_seeds=[int(x) for x in eval_seeds])
 
-        train_meta = train_once(args, train_seed=int(train_seed), bundle=bundle, logger=logger, run_dir=ckpt_dir)
-        checkpoint_path = Path(train_meta["checkpoint_path"]).resolve()
+        if args.eval_only:
+            if not args.checkpoint:
+                print("错误: --eval-only 需要同时指定 --checkpoint", file=sys.stderr)
+                sys.exit(1)
+            checkpoint_path = Path(args.checkpoint).resolve()
+            if not checkpoint_path.exists():
+                print(f"错误: checkpoint 文件不存在: {checkpoint_path}", file=sys.stderr)
+                sys.exit(1)
+            result_dir = Path(args.output_dir).resolve()
+            result_dir.mkdir(parents=True, exist_ok=True)
+            logger = setup_logger(args.log_level, log_file=result_dir / "run.log")
+            logger.info("EvalOnly模式 | checkpoint=%s | result_dir=%s", str(checkpoint_path), str(result_dir))
+            train_meta = {"method": args.method, "output_dim": int(args.hidden_dim), "checkpoint_path": str(checkpoint_path)}
+        else:
+            if args.pca_dims and not args.checkpoint:
+                pass  # 正常训练+PCA流程
+            ckpt_dir, result_dir = build_run_dirs(args)
+            logger = setup_logger(args.log_level, log_file=result_dir / "run.log")
+            logger.info("CheckpointDir=%s", str(ckpt_dir))
+            logger.info("ResultDir=%s", str(result_dir))
+            logger.info("方法=%s | 数据集=%s | train_seed=%d | eval_seeds=%s", args.method, args.dataset, int(train_seed), eval_seeds)
+            dump_run_config(ckpt_dir, args=args, train_seed=int(train_seed), eval_seeds=[int(x) for x in eval_seeds])
+            train_meta = train_once(args, train_seed=int(train_seed), bundle=bundle, logger=logger, run_dir=ckpt_dir)
+            checkpoint_path = Path(train_meta["checkpoint_path"]).resolve()
 
         device = resolve_device(args.gpu_id)
         mode = auto_mode(args.dataset, args.mode)
