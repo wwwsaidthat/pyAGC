@@ -17,6 +17,7 @@ import numpy as np
 import platform
 import torch
 import torch.nn as nn
+from sklearn.decomposition import PCA
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch import Tensor
 from torch_geometric.data import Data
@@ -545,6 +546,22 @@ def summarize_values(values: List[float]) -> Dict[str, float]:
     }
 
 
+def apply_pca(features: Tensor, target_dim: int, random_state: int = 0) -> Tensor:
+    """对特征矩阵执行PCA降维。
+
+    Args:
+        features: [N, D] 原始特征
+        target_dim: 目标维度（必须小于 D）
+        random_state: PCA 随机种子，保证可复现
+
+    Returns:
+        [N, target_dim] 降维后特征
+    """
+    pca = PCA(n_components=target_dim, random_state=random_state)
+    reduced = pca.fit_transform(features.numpy())
+    return torch.from_numpy(reduced.astype(np.float32))
+
+
 def attach_splits(data: Data, bundle: DatasetBundle) -> None:
     data.train_idx = bundle.train_idx
     data.val_idx = bundle.val_idx
@@ -910,12 +927,20 @@ def save_results(
 
     for item in eval_results:
         seed = item["eval_seed"]
-        p = eval_dir / f"eval_seed{seed}.metrics.json"
+        pca_dim = item.get("pca_dim")
+        if pca_dim is not None:
+            p = eval_dir / f"eval_seed{seed}_pca{pca_dim}.metrics.json"
+        else:
+            p = eval_dir / f"eval_seed{seed}.metrics.json"
         with open(p, "w", encoding="utf-8") as f:
             json.dump(item, f, ensure_ascii=False, indent=2)
 
-    acc_values = [float(x["test_metrics"]["accuracy"]) for x in eval_results]
+    # 主评估结果（不含PCA）
+    main_items = [x for x in eval_results if x.get("pca_dim") is None]
+    acc_values = [float(x["test_metrics"]["accuracy"]) for x in main_items]
     stats = summarize_values(acc_values)
+
+    # MRL维度统计
     mrl_dim_accuracy_values: Dict[str, List[float]] = {}
     for item in eval_results:
         dim_acc = item.get("mrl_dim_test_accuracy")
@@ -929,6 +954,24 @@ def save_results(
         dim_stats = summarize_values(mrl_dim_accuracy_values[dim_key])
         mrl_dim_accuracy_stats[dim_key] = {
             "values": mrl_dim_accuracy_values[dim_key],
+            "mean": dim_stats["mean"],
+            "variance": dim_stats["variance"],
+            "std": dim_stats["std"],
+            "mean_pm_variance": f"{dim_stats['mean']:.4f} ± {dim_stats['variance']:.6f}",
+        }
+
+    # PCA维度统计
+    pca_items = [x for x in eval_results if x.get("pca_dim") is not None]
+    pca_dim_accuracy_values: Dict[str, List[float]] = {}
+    for item in pca_items:
+        pca_dim = item["pca_dim"]
+        pca_dim_accuracy_values.setdefault(f"pca_{pca_dim}", []).append(float(item["test_metrics"]["accuracy"]))
+
+    pca_dim_accuracy_stats: Dict[str, Dict[str, Any]] = {}
+    for dim_key in sorted(pca_dim_accuracy_values.keys()):
+        dim_stats = summarize_values(pca_dim_accuracy_values[dim_key])
+        pca_dim_accuracy_stats[dim_key] = {
+            "values": pca_dim_accuracy_values[dim_key],
             "mean": dim_stats["mean"],
             "variance": dim_stats["variance"],
             "std": dim_stats["std"],
@@ -955,6 +998,9 @@ def save_results(
         summary["mrl_dims"] = parse_dims(args.mrl_dims)
     if mrl_dim_accuracy_stats:
         summary["mrl_dim_accuracy_stats"] = mrl_dim_accuracy_stats
+    if pca_dim_accuracy_stats:
+        summary["pca_dims"] = parse_dims(getattr(args, "pca_dims", ""))
+        summary["pca_dim_accuracy_stats"] = pca_dim_accuracy_stats
     summary_json = run_dir / "summary.json"
     with open(summary_json, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -970,6 +1016,13 @@ def save_results(
                     f"{mrl_dim_accuracy_stats[dim_key]['mean']:.4f} +- "
                     f"{mrl_dim_accuracy_stats[dim_key]['variance']:.6f}\n"
                 )
+        if pca_dim_accuracy_stats:
+            for dim_key in sorted(pca_dim_accuracy_stats.keys()):
+                f.write(
+                    f"{dataset}-{method}-{dim_key}: "
+                    f"{pca_dim_accuracy_stats[dim_key]['mean']:.4f} +- "
+                    f"{pca_dim_accuracy_stats[dim_key]['variance']:.6f}\n"
+                )
     logger.info("结果保存: %s", str(summary_json))
     dataset_dir = run_dir.parent.parent
     dataset_summary = dataset_dir / "accuracy_summary.txt"
@@ -983,6 +1036,13 @@ def save_results(
                     f"{method}_{dim_key}: "
                     f"{mrl_dim_accuracy_stats[dim_key]['mean']:.4f} +- "
                     f"{mrl_dim_accuracy_stats[dim_key]['variance']:.6f}\n"
+                )
+        if pca_dim_accuracy_stats:
+            for dim_key in sorted(pca_dim_accuracy_stats.keys()):
+                f.write(
+                    f"{method}_{dim_key}: "
+                    f"{pca_dim_accuracy_stats[dim_key]['mean']:.4f} +- "
+                    f"{pca_dim_accuracy_stats[dim_key]['variance']:.6f}\n"
                 )
         f.write("\n")
 
@@ -1067,6 +1127,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mrl-tau", type=float, default=0.5)
     p.add_argument("--mrl-weight", type=float, default=1.0)
     p.add_argument("--ml-weight", type=float, default=5.0, help="互学习损失权重")
+
+    p.add_argument("--pca-dims", type=str, default=None,
+                   help="PCA基线：逗号分隔的目标维度，例如 32,64,128。训练hidden_dim后PCA降维并评估每维度5次")
 
     p.add_argument("--output-dir", type=str, default="./results")
     p.add_argument("--log-level", type=str, default="INFO")
@@ -1268,6 +1331,56 @@ def main() -> None:
                 if mrl_dim_test_accuracy:
                     result["mrl_dim_test_accuracy"] = mrl_dim_test_accuracy
                 eval_results.append(result)
+
+            # PCA基线评估：训练hidden_dim后PCA降维，每维度5次评估
+            pca_dims_str = getattr(args, "pca_dims", None)
+            if pca_dims_str and not method.is_supervised:
+                pca_dims = parse_dims(pca_dims_str)
+                for pca_dim in pca_dims:
+                    if pca_dim >= int(method.output_dim()):
+                        logger.warning("PCA目标维度 %d >= 原始维度 %d，跳过", pca_dim, int(method.output_dim()))
+                        continue
+                    logger.info("%s PCA降维到 %d %s", "=" * 20, pca_dim, "=" * 20)
+                    pca_features = apply_pca(features, pca_dim)
+                    for seed in eval_seeds:
+                        logger.info("PCA_dim=%d | eval_seed=%d", pca_dim, int(seed))
+                        set_seed(int(seed))
+                        pca_clf = train_linear_eval(
+                            features=pca_features,
+                            labels=data.y.cpu(),
+                            train_idx=bundle.train_idx.cpu(),
+                            val_idx=bundle.val_idx.cpu(),
+                            num_classes=bundle.num_classes,
+                            device=device,
+                            epochs=args.cls_epochs,
+                            lr=args.cls_lr,
+                            weight_decay=args.cls_weight_decay,
+                            batch_size=args.cls_batch_size,
+                            logger=logger,
+                            early_stop=bool(args.cls_early_stop),
+                            patience=int(args.cls_patience),
+                            min_delta=float(args.cls_min_delta),
+                        )
+                        pca_val_pred = predict_on_index(pca_clf, pca_features, bundle.val_idx.cpu(), device, args.cls_batch_size)
+                        pca_test_pred = predict_on_index(pca_clf, pca_features, bundle.test_idx.cpu(), device, args.cls_batch_size)
+                        pca_val_labels = data.y[bundle.val_idx].cpu().numpy()
+                        pca_test_labels = data.y[bundle.test_idx].cpu().numpy()
+                        pca_val_metrics = compute_metrics(pca_val_pred, pca_val_labels)
+                        pca_test_metrics = compute_metrics(pca_test_pred, pca_test_labels)
+                        pca_result: Dict[str, Any] = {
+                            "eval_seed": int(seed),
+                            "method": method.method_name,
+                            "dataset": args.dataset,
+                            "hidden_dim": int(args.hidden_dim),
+                            "num_layers": int(args.num_layers),
+                            "output_dim": pca_dim,
+                            "pca_dim": pca_dim,
+                            "pca_from_dim": int(method.output_dim()),
+                            "val_metrics": pca_val_metrics,
+                            "test_metrics": pca_test_metrics,
+                            "checkpoint_path": str(checkpoint_path),
+                        }
+                        eval_results.append(pca_result)
 
         save_results(run_dir=result_dir, args=args, train_meta=train_meta, eval_results=eval_results, logger=logger)
     except KeyboardInterrupt:
