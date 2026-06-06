@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 def main() -> None:
-    script = Path(__file__).resolve().parent / "train_unified_methods.py"
+    script = Path(__file__).resolve().parent.parent / "train_unified_methods.py"
     cmd = [
         sys.executable, str(script),
         "--method", "dgi",
