@@ -254,7 +254,7 @@ def ensure_local_dataset_ready(dataset: str, root: str) -> None:
         raise ValueError(f"不支持的数据集: {dataset}")
 
 
-def load_dataset(dataset: str, root: str, logger: logging.Logger) -> DatasetBundle:
+def load_dataset(dataset: str, root: str, logger: Optional[logging.Logger] = None) -> DatasetBundle:
     """加载本地数据和官方 split。"""
     ensure_local_dataset_ready(dataset, root)
     x, edge_index, y, train_idx, val_idx, test_idx = get_dataset(
@@ -270,23 +270,24 @@ def load_dataset(dataset: str, root: str, logger: logging.Logger) -> DatasetBund
     data = Data(x=x, edge_index=edge_index, y=y.long())
     num_classes = int(data.y.max().item()) + 1
     n = data.num_nodes
-    logger.info(
-        "数据集=%s | 节点=%d | 边=%d | 特征维=%d | 类别数=%d",
-        dataset,
-        n,
-        data.num_edges,
-        data.num_features,
-        num_classes,
-    )
-    logger.info(
-        "划分: train=%d(%.2f%%), val=%d(%.2f%%), test=%d(%.2f%%)",
-        train_idx.numel(),
-        train_idx.numel() * 100.0 / n,
-        val_idx.numel(),
-        val_idx.numel() * 100.0 / n,
-        test_idx.numel(),
-        test_idx.numel() * 100.0 / n,
-    )
+    if logger is not None:
+        logger.info(
+            "数据集=%s | 节点=%d | 边=%d | 特征维=%d | 类别数=%d",
+            dataset,
+            n,
+            data.num_edges,
+            data.num_features,
+            num_classes,
+        )
+        logger.info(
+            "划分: train=%d(%.2f%%), val=%d(%.2f%%), test=%d(%.2f%%)",
+            train_idx.numel(),
+            train_idx.numel() * 100.0 / n,
+            val_idx.numel(),
+            val_idx.numel() * 100.0 / n,
+            test_idx.numel(),
+            test_idx.numel() * 100.0 / n,
+        )
     return DatasetBundle(
         data=data,
         train_idx=train_idx,
