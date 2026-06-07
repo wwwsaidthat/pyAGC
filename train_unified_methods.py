@@ -547,19 +547,22 @@ def summarize_values(values: List[float]) -> Dict[str, float]:
     }
 
 
-def apply_pca(features: Tensor, target_dim: int, random_state: int = 0) -> Tensor:
-    """对特征矩阵执行PCA降维。
+def apply_pca(features: Tensor, target_dim: int, train_idx: Tensor, random_state: int = 0) -> Tensor:
+    """对特征矩阵执行PCA降维（仅在训练集上拟合，防止数据泄露）。
 
     Args:
         features: [N, D] 原始特征
         target_dim: 目标维度（必须小于 D）
+        train_idx: 训练节点索引，PCA仅在这些节点上拟合
         random_state: PCA 随机种子，保证可复现
 
     Returns:
         [N, target_dim] 降维后特征
     """
     pca = PCA(n_components=target_dim, random_state=random_state)
-    reduced = pca.fit_transform(features.numpy())
+    train_np = features[train_idx].numpy()
+    pca.fit(train_np)
+    reduced = pca.transform(features.numpy())
     return torch.from_numpy(reduced.astype(np.float32))
 
 
@@ -1363,7 +1366,7 @@ def main() -> None:
                         logger.warning("PCA目标维度 %d >= 原始维度 %d，跳过", pca_dim, int(method.output_dim()))
                         continue
                     logger.info("%s PCA降维到 %d %s", "=" * 20, pca_dim, "=" * 20)
-                    pca_features = apply_pca(features, pca_dim)
+                    pca_features = apply_pca(features, pca_dim, bundle.train_idx.cpu())
                     for seed in eval_seeds:
                         logger.info("PCA_dim=%d | eval_seed=%d", pca_dim, int(seed))
                         set_seed(int(seed))
