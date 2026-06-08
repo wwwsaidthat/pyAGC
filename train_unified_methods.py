@@ -17,7 +17,7 @@ import numpy as np
 import platform
 import torch
 import torch.nn as nn
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch import Tensor
 from torch_geometric.data import Data
@@ -566,6 +566,28 @@ def apply_pca(features: Tensor, target_dim: int, train_idx: Tensor, random_state
     return torch.from_numpy(reduced.astype(np.float32))
 
 
+def apply_svd(features: Tensor, target_dim: int, train_idx: Tensor, random_state: int = 0) -> Tensor:
+    """使用截断SVD对特征矩阵进行降维（不去中心化，直接做奇异值分解）。
+
+    与PCA的区别：PCA 先对数据去中心化（减均值）再 SVD，TruncatedSVD 直接对原始数据 SVD。
+    对于稀疏或非负特征，不做中心化可以保留数据结构。
+
+    Args:
+        features: [N, D] 原始特征
+        target_dim: 目标维度（必须小于 D）
+        train_idx: 训练节点索引，SVD仅在这些节点上拟合
+        random_state: 随机种子，保证可复现
+
+    Returns:
+        [N, target_dim] 降维后特征
+    """
+    svd = TruncatedSVD(n_components=target_dim, random_state=random_state)
+    train_np = features[train_idx].numpy()
+    svd.fit(train_np)
+    reduced = svd.transform(features.numpy())
+    return torch.from_numpy(reduced.astype(np.float32))
+
+
 def attach_splits(data: Data, bundle: DatasetBundle) -> None:
     data.train_idx = bundle.train_idx
     data.val_idx = bundle.val_idx
@@ -932,15 +954,18 @@ def save_results(
     for item in eval_results:
         seed = item["eval_seed"]
         pca_dim = item.get("pca_dim")
+        svd_dim = item.get("svd_dim")
         if pca_dim is not None:
             p = eval_dir / f"eval_seed{seed}_pca{pca_dim}.metrics.json"
+        elif svd_dim is not None:
+            p = eval_dir / f"eval_seed{seed}_svd{svd_dim}.metrics.json"
         else:
             p = eval_dir / f"eval_seed{seed}.metrics.json"
         with open(p, "w", encoding="utf-8") as f:
             json.dump(item, f, ensure_ascii=False, indent=2)
 
-    # 主评估结果（不含PCA）
-    main_items = [x for x in eval_results if x.get("pca_dim") is None]
+    # 主评估结果（不含PCA/SVD降维）
+    main_items = [x for x in eval_results if x.get("pca_dim") is None and x.get("svd_dim") is None]
     acc_values = [float(x["test_metrics"]["accuracy"]) for x in main_items]
     stats = summarize_values(acc_values)
 
@@ -982,6 +1007,24 @@ def save_results(
             "mean_pm_variance": f"{dim_stats['mean']:.4f} ± {dim_stats['variance']:.6f}",
         }
 
+    # SVD维度统计
+    svd_items = [x for x in eval_results if x.get("svd_dim") is not None]
+    svd_dim_accuracy_values: Dict[str, List[float]] = {}
+    for item in svd_items:
+        svd_dim = item["svd_dim"]
+        svd_dim_accuracy_values.setdefault(f"svd_{svd_dim}", []).append(float(item["test_metrics"]["accuracy"]))
+
+    svd_dim_accuracy_stats: Dict[str, Dict[str, Any]] = {}
+    for dim_key in sorted(svd_dim_accuracy_values.keys()):
+        dim_stats = summarize_values(svd_dim_accuracy_values[dim_key])
+        svd_dim_accuracy_stats[dim_key] = {
+            "values": svd_dim_accuracy_values[dim_key],
+            "mean": dim_stats["mean"],
+            "variance": dim_stats["variance"],
+            "std": dim_stats["std"],
+            "mean_pm_variance": f"{dim_stats['mean']:.4f} ± {dim_stats['variance']:.6f}",
+        }
+
     summary = {
         "dataset": dataset,
         "method": method,
@@ -1005,6 +1048,9 @@ def save_results(
     if pca_dim_accuracy_stats:
         summary["pca_dims"] = parse_dims(getattr(args, "pca_dims", ""))
         summary["pca_dim_accuracy_stats"] = pca_dim_accuracy_stats
+    if svd_dim_accuracy_stats:
+        summary["svd_dims"] = parse_dims(getattr(args, "svd_dims", ""))
+        summary["svd_dim_accuracy_stats"] = svd_dim_accuracy_stats
     summary_json = run_dir / "summary.json"
     with open(summary_json, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -1134,6 +1180,9 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--pca-dims", type=str, default=None,
                    help="PCA基线：逗号分隔的目标维度，例如 32,64,128。训练hidden_dim后PCA降维并评估每维度5次")
+
+    p.add_argument("--svd-dims", type=str, default=None,
+                   help="SVD基线：逗号分隔的目标维度，例如 32,64,128。使用TruncatedSVD（不去中心化）降维并评估每维度5次")
 
     p.add_argument("--eval-only", action="store_true",
                    help="仅评估模式：跳过训练，直接从 --checkpoint 加载模型进行PCA/标准评估")
@@ -1406,6 +1455,56 @@ def main() -> None:
                             "checkpoint_path": str(checkpoint_path),
                         }
                         eval_results.append(pca_result)
+
+            # SVD基线评估：使用TruncatedSVD（不去中心化）降维，每维度5次评估
+            svd_dims_str = getattr(args, "svd_dims", None)
+            if svd_dims_str and not method.is_supervised:
+                svd_dims = parse_dims(svd_dims_str)
+                for svd_dim in svd_dims:
+                    if svd_dim >= int(method.output_dim()):
+                        logger.warning("SVD目标维度 %d >= 原始维度 %d，跳过", svd_dim, int(method.output_dim()))
+                        continue
+                    logger.info("%s SVD降维到 %d %s", "=" * 20, svd_dim, "=" * 20)
+                    svd_features = apply_svd(features, svd_dim, bundle.train_idx.cpu())
+                    for seed in eval_seeds:
+                        logger.info("SVD_dim=%d | eval_seed=%d", svd_dim, int(seed))
+                        set_seed(int(seed))
+                        svd_clf = train_linear_eval(
+                            features=svd_features,
+                            labels=data.y.cpu(),
+                            train_idx=bundle.train_idx.cpu(),
+                            val_idx=bundle.val_idx.cpu(),
+                            num_classes=bundle.num_classes,
+                            device=device,
+                            epochs=args.cls_epochs,
+                            lr=args.cls_lr,
+                            weight_decay=args.cls_weight_decay,
+                            batch_size=args.cls_batch_size,
+                            logger=logger,
+                            early_stop=bool(args.cls_early_stop),
+                            patience=int(args.cls_patience),
+                            min_delta=float(args.cls_min_delta),
+                        )
+                        svd_val_pred = predict_on_index(svd_clf, svd_features, bundle.val_idx.cpu(), device, args.cls_batch_size)
+                        svd_test_pred = predict_on_index(svd_clf, svd_features, bundle.test_idx.cpu(), device, args.cls_batch_size)
+                        svd_val_labels = data.y[bundle.val_idx].cpu().numpy()
+                        svd_test_labels = data.y[bundle.test_idx].cpu().numpy()
+                        svd_val_metrics = compute_metrics(svd_val_pred, svd_val_labels)
+                        svd_test_metrics = compute_metrics(svd_test_pred, svd_test_labels)
+                        svd_result: Dict[str, Any] = {
+                            "eval_seed": int(seed),
+                            "method": method.method_name,
+                            "dataset": args.dataset,
+                            "hidden_dim": int(args.hidden_dim),
+                            "num_layers": int(args.num_layers),
+                            "output_dim": svd_dim,
+                            "svd_dim": svd_dim,
+                            "svd_from_dim": int(method.output_dim()),
+                            "val_metrics": svd_val_metrics,
+                            "test_metrics": svd_test_metrics,
+                            "checkpoint_path": str(checkpoint_path),
+                        }
+                        eval_results.append(svd_result)
 
         save_results(run_dir=result_dir, args=args, train_meta=train_meta, eval_results=eval_results, logger=logger)
     except KeyboardInterrupt:
