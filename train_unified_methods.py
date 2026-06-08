@@ -111,6 +111,22 @@ def resolve_device(gpu_id: str) -> torch.device:
     return torch.device(f"cuda:{idx}")
 
 
+def resolve_infer_device(infer_device: str) -> torch.device:
+    """解析推理设备参数：默认强制 CPU。"""
+    if infer_device == "cpu":
+        return torch.device("cpu")
+    if infer_device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not infer_device.isdigit():
+        raise ValueError("--infer-device 仅支持 cpu / auto / 非负整数")
+    idx = int(infer_device)
+    if not torch.cuda.is_available():
+        raise RuntimeError("当前环境未检测到 CUDA，无法指定 GPU。")
+    if idx < 0 or idx >= torch.cuda.device_count():
+        raise ValueError(f"无效 GPU 编号: {idx}, 可用范围 0~{torch.cuda.device_count()-1}")
+    return torch.device(f"cuda:{idx}")
+
+
 def parse_dims(text: str) -> List[int]:
     """解析 MRL 多维输出。"""
     out = [int(x.strip()) for x in text.split(",") if x.strip()]
@@ -827,18 +843,19 @@ def evaluate_once(
 ) -> Dict[str, Any]:
     set_seed(eval_seed)
     device = resolve_device(args.gpu_id)
+    infer_device = resolve_infer_device(args.infer_device)
     mode = auto_mode(args.dataset, args.mode)
     data = bundle.data
     attach_splits(data, bundle)
 
-    method = load_model_checkpoint(checkpoint_path, args=args, bundle=bundle, device=device, logger=logger)
+    method = load_model_checkpoint(checkpoint_path, args=args, bundle=bundle, device=infer_device, logger=logger)
     out_dim = int(method.output_dim())
     logger.info(
         "评估开始 | 方法=%s | 数据集=%s | 表示维度=%d | 设备=%s | mode=%s | eval_seed=%d",
         method.method_name,
         args.dataset,
         out_dim,
-        device,
+        infer_device,
         mode,
         int(eval_seed),
     )
@@ -849,7 +866,7 @@ def evaluate_once(
         logits = method.supervised_predict(
             data=data,
             mode=mode,
-            device=device,
+            device=infer_device,
             eval_num_neighbors=args.eval_num_neighbors,
             eval_batch_size=args.eval_batch_size,
         )
@@ -859,7 +876,7 @@ def evaluate_once(
         features = method.infer_embeddings(
             data=data,
             mode=mode,
-            device=device,
+            device=infer_device,
             eval_num_neighbors=args.eval_num_neighbors,
             eval_batch_size=args.eval_batch_size,
         )
@@ -869,7 +886,7 @@ def evaluate_once(
             train_idx=bundle.train_idx.cpu(),
             val_idx=bundle.val_idx.cpu(),
             num_classes=bundle.num_classes,
-            device=device,
+            device=infer_device,
             epochs=args.cls_epochs,
             lr=args.cls_lr,
             weight_decay=args.cls_weight_decay,
@@ -879,8 +896,8 @@ def evaluate_once(
             patience=int(args.cls_patience),
             min_delta=float(args.cls_min_delta),
         )
-        val_pred = predict_on_index(clf, features, bundle.val_idx.cpu(), device, args.cls_batch_size)
-        test_pred = predict_on_index(clf, features, bundle.test_idx.cpu(), device, args.cls_batch_size)
+        val_pred = predict_on_index(clf, features, bundle.val_idx.cpu(), infer_device, args.cls_batch_size)
+        test_pred = predict_on_index(clf, features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size)
 
         mrl_dims_for_eval: Optional[List[int]] = None
         if hasattr(method, "mrl") and hasattr(method.mrl, "dims"):
@@ -900,7 +917,7 @@ def evaluate_once(
                     train_idx=bundle.train_idx.cpu(),
                     val_idx=bundle.val_idx.cpu(),
                     num_classes=bundle.num_classes,
-                    device=device,
+                    device=infer_device,
                     epochs=args.cls_epochs,
                     lr=args.cls_lr,
                     weight_decay=args.cls_weight_decay,
@@ -910,7 +927,7 @@ def evaluate_once(
                     patience=int(args.cls_patience),
                     min_delta=float(args.cls_min_delta),
                 )
-                dim_test_pred = predict_on_index(dim_clf, dim_features, bundle.test_idx.cpu(), device, args.cls_batch_size)
+                dim_test_pred = predict_on_index(dim_clf, dim_features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size)
                 dim_test_acc = float(accuracy_score(test_labels_np, dim_test_pred))
                 mrl_dim_test_accuracy[dim_key] = dim_test_acc
                 logger.info("MRL维度 %s | test_acc=%.4f", dim_key, dim_test_acc)
@@ -1130,6 +1147,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--root", type=str, default="./data")
     p.add_argument("--mode", type=str, default="auto", choices=["auto", "full", "neighbor"])
     p.add_argument("--gpu-id", type=str, default="auto", help="auto/cpu/0/1...")
+    p.add_argument("--infer-device", type=str, default="cpu", help="推理设备 cpu/auto/0/1...")
 
     p.add_argument("--num-layers", type=int, default=2)
     p.add_argument("--hidden-dim", type=int, default=256)
@@ -1230,10 +1248,11 @@ def main() -> None:
             checkpoint_path = Path(train_meta["checkpoint_path"]).resolve()
 
         device = resolve_device(args.gpu_id)
+        infer_device = resolve_infer_device(args.infer_device)
         mode = auto_mode(args.dataset, args.mode)
         data = bundle.data
         attach_splits(data, bundle)
-        method = load_model_checkpoint(checkpoint_path, args=args, bundle=bundle, device=device, logger=logger)
+        method = load_model_checkpoint(checkpoint_path, args=args, bundle=bundle, device=infer_device, logger=logger)
         method.eval()
 
         eval_results: List[Dict[str, Any]] = []
@@ -1247,7 +1266,7 @@ def main() -> None:
                 logits = method.supervised_predict(
                     data=data,
                     mode=mode,
-                    device=device,
+                    device=infer_device,
                     eval_num_neighbors=args.eval_num_neighbors,
                     eval_batch_size=args.eval_batch_size,
                 )
@@ -1280,14 +1299,14 @@ def main() -> None:
                         method.method_name,
                         args.dataset,
                         int(method.output_dim()),
-                        device,
+                        infer_device,
                         mode,
                         int(seed),
                     )
                     logits = method.supervised_predict(
                         data=data,
                         mode=mode,
-                        device=device,
+                        device=infer_device,
                         eval_num_neighbors=args.eval_num_neighbors,
                         eval_batch_size=args.eval_batch_size,
                     )
@@ -1312,7 +1331,7 @@ def main() -> None:
             features = method.infer_embeddings(
                 data=data,
                 mode=mode,
-                device=device,
+                device=infer_device,
                 eval_num_neighbors=args.eval_num_neighbors,
                 eval_batch_size=args.eval_batch_size,
             )
@@ -1331,7 +1350,7 @@ def main() -> None:
                     method.method_name,
                     args.dataset,
                     int(method.output_dim()),
-                    device,
+                    infer_device,
                     mode,
                     int(seed),
                 )
@@ -1342,7 +1361,7 @@ def main() -> None:
                     train_idx=bundle.train_idx.cpu(),
                     val_idx=bundle.val_idx.cpu(),
                     num_classes=bundle.num_classes,
-                    device=device,
+                    device=infer_device,
                     epochs=args.cls_epochs,
                     lr=args.cls_lr,
                     weight_decay=args.cls_weight_decay,
@@ -1352,8 +1371,8 @@ def main() -> None:
                     patience=int(args.cls_patience),
                     min_delta=float(args.cls_min_delta),
                 )
-                val_pred = predict_on_index(clf, features, bundle.val_idx.cpu(), device, args.cls_batch_size)
-                test_pred = predict_on_index(clf, features, bundle.test_idx.cpu(), device, args.cls_batch_size)
+                val_pred = predict_on_index(clf, features, bundle.val_idx.cpu(), infer_device, args.cls_batch_size)
+                test_pred = predict_on_index(clf, features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size)
 
                 mrl_dim_test_accuracy: Dict[str, float] = {}
                 if mrl_dims_for_eval:
@@ -1368,7 +1387,7 @@ def main() -> None:
                             train_idx=bundle.train_idx.cpu(),
                             val_idx=bundle.val_idx.cpu(),
                             num_classes=bundle.num_classes,
-                            device=device,
+                            device=infer_device,
                             epochs=args.cls_epochs,
                             lr=args.cls_lr,
                             weight_decay=args.cls_weight_decay,
@@ -1379,7 +1398,7 @@ def main() -> None:
                             min_delta=float(args.cls_min_delta),
                         )
                         dim_test_pred = predict_on_index(
-                            dim_clf, dim_features, bundle.test_idx.cpu(), device, args.cls_batch_size
+                            dim_clf, dim_features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size
                         )
                         dim_test_acc = float(accuracy_score(test_labels_np, dim_test_pred))
                         mrl_dim_test_accuracy[dim_key] = dim_test_acc
@@ -1425,7 +1444,7 @@ def main() -> None:
                             train_idx=bundle.train_idx.cpu(),
                             val_idx=bundle.val_idx.cpu(),
                             num_classes=bundle.num_classes,
-                            device=device,
+                            device=infer_device,
                             epochs=args.cls_epochs,
                             lr=args.cls_lr,
                             weight_decay=args.cls_weight_decay,
@@ -1435,8 +1454,8 @@ def main() -> None:
                             patience=int(args.cls_patience),
                             min_delta=float(args.cls_min_delta),
                         )
-                        pca_val_pred = predict_on_index(pca_clf, pca_features, bundle.val_idx.cpu(), device, args.cls_batch_size)
-                        pca_test_pred = predict_on_index(pca_clf, pca_features, bundle.test_idx.cpu(), device, args.cls_batch_size)
+                        pca_val_pred = predict_on_index(pca_clf, pca_features, bundle.val_idx.cpu(), infer_device, args.cls_batch_size)
+                        pca_test_pred = predict_on_index(pca_clf, pca_features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size)
                         pca_val_labels = data.y[bundle.val_idx].cpu().numpy()
                         pca_test_labels = data.y[bundle.test_idx].cpu().numpy()
                         pca_val_metrics = compute_metrics(pca_val_pred, pca_val_labels)
@@ -1475,7 +1494,7 @@ def main() -> None:
                             train_idx=bundle.train_idx.cpu(),
                             val_idx=bundle.val_idx.cpu(),
                             num_classes=bundle.num_classes,
-                            device=device,
+                            device=infer_device,
                             epochs=args.cls_epochs,
                             lr=args.cls_lr,
                             weight_decay=args.cls_weight_decay,
@@ -1485,8 +1504,8 @@ def main() -> None:
                             patience=int(args.cls_patience),
                             min_delta=float(args.cls_min_delta),
                         )
-                        svd_val_pred = predict_on_index(svd_clf, svd_features, bundle.val_idx.cpu(), device, args.cls_batch_size)
-                        svd_test_pred = predict_on_index(svd_clf, svd_features, bundle.test_idx.cpu(), device, args.cls_batch_size)
+                        svd_val_pred = predict_on_index(svd_clf, svd_features, bundle.val_idx.cpu(), infer_device, args.cls_batch_size)
+                        svd_test_pred = predict_on_index(svd_clf, svd_features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size)
                         svd_val_labels = data.y[bundle.val_idx].cpu().numpy()
                         svd_test_labels = data.y[bundle.test_idx].cpu().numpy()
                         svd_val_metrics = compute_metrics(svd_val_pred, svd_val_labels)
