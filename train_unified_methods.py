@@ -8,10 +8,16 @@ import json
 import logging
 import random
 import sys
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# 忽略 OGB / PyG 数据加载的已知无害警告
+warnings.filterwarnings("ignore", category=FutureWarning, module="ogb")
+warnings.filterwarnings("ignore", message=".*non-writable.*")
+warnings.filterwarnings("ignore", message=".*NeighborSampler.*without.*pyg-lib.*")
 
 import numpy as np
 import platform
