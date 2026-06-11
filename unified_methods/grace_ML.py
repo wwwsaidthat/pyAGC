@@ -15,12 +15,11 @@ GRACE 损失计算与父类 GRACEWithMRLMethod 完全一致，
 均通过 self.model.nt_xent 调用，保证 ml_weight=0 时严格等价。
 """
 
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-from torch_geometric.data import Data
 
 from .grace_mrl_method import GRACEWithMRLMethod
 from .ML_module import MutualLearningLoss, compute_state
@@ -115,43 +114,6 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         return total, dim_losses
 
     # ------------------------------------------------------------------
-    # 训练步骤：复用父类逻辑，仅附加 verbose 打印
+    # 训练步骤：继承父类逻辑（GRACE 损失 + 互学习损失已在 _grace_prefix_loss_with_details 中计算），
+    # 父类的 train_step 自动使用覆盖后的损失函数，无需额外 print。
     # ------------------------------------------------------------------
-
-    def ssl_train_step_full(
-        self, data: Data, device, optimizer
-    ) -> float:
-        """全量训练步骤。调用父类实现（自动使用覆盖后的损失计算）。"""
-        loss = super().ssl_train_step_full(data, device, optimizer)
-        if self.verbose:
-            d = self.last_mrl_dim_losses
-            print(
-                f"[Epoch {self.epoch}] "
-                f"GRACE Loss: {d.get('grace_loss', 0):.4f} | "
-                f"ML Loss: {d.get('ml_loss', 0):.4f} | "
-                f"Total Loss: {loss:.4f}"
-            )
-        return loss
-
-    def ssl_train_step_neighbor(
-        self,
-        data: Data,
-        input_nodes: Optional[Tensor],
-        num_neighbors: Sequence[int],
-        batch_size: int,
-        device,
-        optimizer,
-    ) -> float:
-        """邻居采样训练步骤。调用父类实现（自动使用覆盖后的损失计算）。"""
-        loss = super().ssl_train_step_neighbor(
-            data, input_nodes, num_neighbors, batch_size, device, optimizer
-        )
-        if self.verbose:
-            d = self.last_mrl_dim_losses
-            print(
-                f"[Epoch {self.epoch}] "
-                f"GRACE Loss: {d.get('grace_loss', 0):.4f} | "
-                f"ML Loss: {d.get('ml_loss', 0):.4f} | "
-                f"Total Loss: {loss:.4f}"
-            )
-        return loss

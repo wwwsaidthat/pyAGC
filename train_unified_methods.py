@@ -885,8 +885,20 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
                     device=device,
                     optimizer=optimizer,
                 )
+            # 构建详细损失信息（MRL/ML 方法会提供分量损失）
+            extra_info = ""
+            if hasattr(method, "get_last_mrl_dim_losses"):
+                d = method.get_last_mrl_dim_losses()
+                if d:
+                    parts = []
+                    for k, v in d.items():
+                        if k.startswith("dim_"):
+                            continue  # 维度级损失太多，跳过
+                        parts.append(f"{k}={v:.4f}")
+                    if parts:
+                        extra_info = " | " + " | ".join(parts)
             if args.pretrain_early_stop and (ep % int(args.pretrain_eval_every) == 0 or ep == args.pretrain_epochs):
-                logger.info("Pretrain Epoch %03d | loss=%.4f", ep, loss)
+                logger.info("Pretrain Epoch %03d | loss=%.4f%s", ep, loss, extra_info)
                 if loss < best_ssl - float(args.pretrain_min_delta):
                     best_ssl = float(loss)
                     best_ssl_epoch = int(ep)
@@ -903,7 +915,7 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
                         )
                         break
             else:
-                logger.info("Pretrain Epoch %03d | loss=%.4f", ep, loss)
+                logger.info("Pretrain Epoch %03d | loss=%.4f%s", ep, loss, extra_info)
         ckpt_path = save_model_checkpoint(
             run_dir=run_dir,
             args=args,
@@ -1360,12 +1372,10 @@ def main() -> None:
             
             if is_full_graph_eval:
                 # 全图模式：只推理一次，结果重复5次（确定性结果）
-                logits = method.supervised_predict(
-                    data=data,
-                    mode=mode,
-                    device=infer_device,
+                logits, actual_eval_device = run_infer_with_fallback(
+                    method=method, data=data, mode=mode, prefer_device=infer_device,
                     eval_num_neighbors=args.eval_num_neighbors,
-                    eval_batch_size=args.eval_batch_size,
+                    eval_batch_size=args.eval_batch_size, logger=logger,
                 )
                 val_pred = logits[bundle.val_idx].argmax(dim=-1).numpy()
                 test_pred = logits[bundle.test_idx].argmax(dim=-1).numpy()
@@ -1400,12 +1410,10 @@ def main() -> None:
                         mode,
                         int(seed),
                     )
-                    logits = method.supervised_predict(
-                        data=data,
-                        mode=mode,
-                        device=infer_device,
+                    logits, actual_eval_device = run_infer_with_fallback(
+                        method=method, data=data, mode=mode, prefer_device=infer_device,
                         eval_num_neighbors=args.eval_num_neighbors,
-                        eval_batch_size=args.eval_batch_size,
+                        eval_batch_size=args.eval_batch_size, logger=logger,
                     )
                     val_pred = logits[bundle.val_idx].argmax(dim=-1).numpy()
                     test_pred = logits[bundle.test_idx].argmax(dim=-1).numpy()

@@ -72,8 +72,8 @@ class CCASSG(TrainableModel):
         Returns:
             Tuple of (total_loss, invariance_term, decorrelation_term).
         """
-        z1 = (z1 - z1.mean(0)) / z1.std(0)
-        z2 = (z2 - z2.mean(0)) / z2.std(0)
+        z1 = (z1 - z1.mean(0)) / (z1.std(0) + 1e-12)
+        z2 = (z2 - z2.mean(0)) / (z2.std(0) + 1e-12)
 
         inv = -(z1 * z2).sum() / z1.shape[0]  # invariance loss
 

@@ -118,7 +118,8 @@ class DGI(TrainableModel):
     def reset_parameters(self):
         r"""Resets all learnable parameters of the module."""
         reset(self.encoder)
-        reset(self.summary)
+        if isinstance(self.summary, torch.nn.Module):
+            reset(self.summary)
         uniform(self.hidden_channels, self.weight)
 
     def embed(self, *args, **kwargs) -> Tensor:
