@@ -51,6 +51,7 @@ def setup_logger(level: str, log_file: Optional[Path] = None) -> logging.Logger:
     """配置日志输出。"""
     logger = logging.getLogger("unified_ssl")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    logger.propagate = False
     logger.handlers.clear()
     formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)s | %(message)s",
