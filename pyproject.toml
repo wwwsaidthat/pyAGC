@@ -35,6 +35,8 @@ classifiers = [
 ]
 dependencies = [
   "torch-geometric >= 2.7.0",
+  "torch-sparse",
+  "torch-scatter",
   "pytorch-frame",
   "torch",
   "scikit-learn",
