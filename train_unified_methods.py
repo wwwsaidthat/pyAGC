@@ -127,6 +127,103 @@ def resolve_infer_device(infer_device: str) -> torch.device:
     return torch.device(f"cuda:{idx}")
 
 
+def run_infer_with_fallback(
+    method,
+    data: Data,
+    mode: str,
+    prefer_device: torch.device,
+    eval_num_neighbors,
+    eval_batch_size: int,
+    logger: logging.Logger,
+) -> tuple[Tensor, torch.device]:
+    """优先在 GPU 上执行推理；OOM 时自动清理显存并回退到 CPU。
+
+    返回 (result, actual_device)，actual_device 供下游线性评估沿用。
+    """
+    try:
+        if method.is_supervised:
+            result = method.supervised_predict(
+                data=data, mode=mode, device=prefer_device,
+                eval_num_neighbors=eval_num_neighbors,
+                eval_batch_size=eval_batch_size,
+            )
+        else:
+            result = method.infer_embeddings(
+                data=data, mode=mode, device=prefer_device,
+                eval_num_neighbors=eval_num_neighbors,
+                eval_batch_size=eval_batch_size,
+            )
+        return result, prefer_device
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+        if not torch.cuda.is_available() or prefer_device.type != "cuda":
+            raise
+        msg = str(e)
+        if "out of memory" not in msg.lower() and "OutOfMemory" not in msg:
+            raise
+        logger.warning("GPU OOM 于推理阶段 (%s)，自动回退到 CPU", msg.strip()[:120])
+        torch.cuda.empty_cache()
+        method.cpu()
+        if method.is_supervised:
+            result = method.supervised_predict(
+                data=data, mode=mode, device=torch.device("cpu"),
+                eval_num_neighbors=eval_num_neighbors,
+                eval_batch_size=eval_batch_size,
+            )
+        else:
+            result = method.infer_embeddings(
+                data=data, mode=mode, device=torch.device("cpu"),
+                eval_num_neighbors=eval_num_neighbors,
+                eval_batch_size=eval_batch_size,
+            )
+        return result, torch.device("cpu")
+
+
+def run_linear_eval_with_fallback(
+    features: Tensor,
+    labels: Tensor,
+    train_idx: Tensor,
+    val_idx: Tensor,
+    num_classes: int,
+    prefer_device: torch.device,
+    epochs: int,
+    lr: float,
+    weight_decay: float,
+    batch_size: int,
+    logger: logging.Logger,
+    early_stop: bool = False,
+    patience: int = 20,
+    min_delta: float = 1e-4,
+) -> tuple:
+    """训练线性分类头，优先 GPU，OOM 时回退 CPU。"""
+    try:
+        clf = train_linear_eval(
+            features=features, labels=labels,
+            train_idx=train_idx, val_idx=val_idx,
+            num_classes=num_classes, device=prefer_device,
+            epochs=epochs, lr=lr, weight_decay=weight_decay,
+            batch_size=batch_size, logger=logger,
+            early_stop=early_stop, patience=patience, min_delta=min_delta,
+        )
+        return clf, prefer_device
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+        if not torch.cuda.is_available() or prefer_device.type != "cuda":
+            raise
+        msg = str(e)
+        if "out of memory" not in msg.lower() and "OutOfMemory" not in msg:
+            raise
+        logger.warning("GPU OOM 于线性评估阶段 (%s)，自动回退到 CPU", msg.strip()[:120])
+        torch.cuda.empty_cache()
+        clf = train_linear_eval(
+            features=features, labels=labels,
+            train_idx=train_idx, val_idx=val_idx,
+            num_classes=num_classes, device=torch.device("cpu"),
+            epochs=epochs, lr=lr, weight_decay=weight_decay,
+            batch_size=batch_size, logger=logger,
+            early_stop=early_stop, patience=patience, min_delta=min_delta,
+        )
+        return clf, torch.device("cpu")
+
+
 def parse_dims(text: str) -> List[int]:
     """解析 MRL 多维输出。"""
     out = [int(x.strip()) for x in text.split(",") if x.strip()]
@@ -1147,7 +1244,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--root", type=str, default="./data")
     p.add_argument("--mode", type=str, default="auto", choices=["auto", "full", "neighbor"])
     p.add_argument("--gpu-id", type=str, default="auto", help="auto/cpu/0/1...")
-    p.add_argument("--infer-device", type=str, default="cpu", help="推理设备 cpu/auto/0/1...")
+    p.add_argument("--infer-device", type=str, default="auto", help="推理设备 auto/cpu/0/1... 优先GPU，OOM自动回退CPU")
 
     p.add_argument("--num-layers", type=int, default=2)
     p.add_argument("--hidden-dim", type=int, default=256)
@@ -1328,12 +1425,10 @@ def main() -> None:
                         "checkpoint_path": str(checkpoint_path),
                     })
         else:
-            features = method.infer_embeddings(
-                data=data,
-                mode=mode,
-                device=infer_device,
+            features, actual_infer_device = run_infer_with_fallback(
+                method=method, data=data, mode=mode, prefer_device=infer_device,
                 eval_num_neighbors=args.eval_num_neighbors,
-                eval_batch_size=args.eval_batch_size,
+                eval_batch_size=args.eval_batch_size, logger=logger,
             )
 
             mrl_dims_for_eval: Optional[List[int]] = None
@@ -1350,18 +1445,18 @@ def main() -> None:
                     method.method_name,
                     args.dataset,
                     int(method.output_dim()),
-                    infer_device,
+                    actual_infer_device,
                     mode,
                     int(seed),
                 )
 
-                clf = train_linear_eval(
+                clf, actual_infer_device = run_linear_eval_with_fallback(
                     features=features,
                     labels=data.y.cpu(),
                     train_idx=bundle.train_idx.cpu(),
                     val_idx=bundle.val_idx.cpu(),
                     num_classes=bundle.num_classes,
-                    device=infer_device,
+                    prefer_device=actual_infer_device,
                     epochs=args.cls_epochs,
                     lr=args.cls_lr,
                     weight_decay=args.cls_weight_decay,
@@ -1371,8 +1466,8 @@ def main() -> None:
                     patience=int(args.cls_patience),
                     min_delta=float(args.cls_min_delta),
                 )
-                val_pred = predict_on_index(clf, features, bundle.val_idx.cpu(), infer_device, args.cls_batch_size)
-                test_pred = predict_on_index(clf, features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size)
+                val_pred = predict_on_index(clf, features, bundle.val_idx.cpu(), actual_infer_device, args.cls_batch_size)
+                test_pred = predict_on_index(clf, features, bundle.test_idx.cpu(), actual_infer_device, args.cls_batch_size)
 
                 mrl_dim_test_accuracy: Dict[str, float] = {}
                 if mrl_dims_for_eval:
@@ -1381,13 +1476,13 @@ def main() -> None:
                     for dim in dims:
                         dim_key = f"dim_{dim}"
                         dim_features = features[:, :dim]
-                        dim_clf = train_linear_eval(
+                        dim_clf, _ = run_linear_eval_with_fallback(
                             features=dim_features,
                             labels=data.y.cpu(),
                             train_idx=bundle.train_idx.cpu(),
                             val_idx=bundle.val_idx.cpu(),
                             num_classes=bundle.num_classes,
-                            device=infer_device,
+                            prefer_device=actual_infer_device,
                             epochs=args.cls_epochs,
                             lr=args.cls_lr,
                             weight_decay=args.cls_weight_decay,
@@ -1398,7 +1493,7 @@ def main() -> None:
                             min_delta=float(args.cls_min_delta),
                         )
                         dim_test_pred = predict_on_index(
-                            dim_clf, dim_features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size
+                            dim_clf, dim_features, bundle.test_idx.cpu(), actual_infer_device, args.cls_batch_size
                         )
                         dim_test_acc = float(accuracy_score(test_labels_np, dim_test_pred))
                         mrl_dim_test_accuracy[dim_key] = dim_test_acc
@@ -1438,13 +1533,13 @@ def main() -> None:
                     for seed in eval_seeds:
                         logger.info("PCA_dim=%d | eval_seed=%d", pca_dim, int(seed))
                         set_seed(int(seed))
-                        pca_clf = train_linear_eval(
+                        pca_clf, _ = run_linear_eval_with_fallback(
                             features=pca_features,
                             labels=data.y.cpu(),
                             train_idx=bundle.train_idx.cpu(),
                             val_idx=bundle.val_idx.cpu(),
                             num_classes=bundle.num_classes,
-                            device=infer_device,
+                            prefer_device=actual_infer_device,
                             epochs=args.cls_epochs,
                             lr=args.cls_lr,
                             weight_decay=args.cls_weight_decay,
@@ -1454,8 +1549,8 @@ def main() -> None:
                             patience=int(args.cls_patience),
                             min_delta=float(args.cls_min_delta),
                         )
-                        pca_val_pred = predict_on_index(pca_clf, pca_features, bundle.val_idx.cpu(), infer_device, args.cls_batch_size)
-                        pca_test_pred = predict_on_index(pca_clf, pca_features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size)
+                        pca_val_pred = predict_on_index(pca_clf, pca_features, bundle.val_idx.cpu(), actual_infer_device, args.cls_batch_size)
+                        pca_test_pred = predict_on_index(pca_clf, pca_features, bundle.test_idx.cpu(), actual_infer_device, args.cls_batch_size)
                         pca_val_labels = data.y[bundle.val_idx].cpu().numpy()
                         pca_test_labels = data.y[bundle.test_idx].cpu().numpy()
                         pca_val_metrics = compute_metrics(pca_val_pred, pca_val_labels)
@@ -1488,13 +1583,13 @@ def main() -> None:
                     for seed in eval_seeds:
                         logger.info("SVD_dim=%d | eval_seed=%d", svd_dim, int(seed))
                         set_seed(int(seed))
-                        svd_clf = train_linear_eval(
+                        svd_clf, _ = run_linear_eval_with_fallback(
                             features=svd_features,
                             labels=data.y.cpu(),
                             train_idx=bundle.train_idx.cpu(),
                             val_idx=bundle.val_idx.cpu(),
                             num_classes=bundle.num_classes,
-                            device=infer_device,
+                            prefer_device=actual_infer_device,
                             epochs=args.cls_epochs,
                             lr=args.cls_lr,
                             weight_decay=args.cls_weight_decay,
@@ -1504,8 +1599,8 @@ def main() -> None:
                             patience=int(args.cls_patience),
                             min_delta=float(args.cls_min_delta),
                         )
-                        svd_val_pred = predict_on_index(svd_clf, svd_features, bundle.val_idx.cpu(), infer_device, args.cls_batch_size)
-                        svd_test_pred = predict_on_index(svd_clf, svd_features, bundle.test_idx.cpu(), infer_device, args.cls_batch_size)
+                        svd_val_pred = predict_on_index(svd_clf, svd_features, bundle.val_idx.cpu(), actual_infer_device, args.cls_batch_size)
+                        svd_test_pred = predict_on_index(svd_clf, svd_features, bundle.test_idx.cpu(), actual_infer_device, args.cls_batch_size)
                         svd_val_labels = data.y[bundle.val_idx].cpu().numpy()
                         svd_test_labels = data.y[bundle.test_idx].cpu().numpy()
                         svd_val_metrics = compute_metrics(svd_val_pred, svd_val_labels)
