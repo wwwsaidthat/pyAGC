@@ -1,15 +1,26 @@
-"""GRACE + MRL + Mutual Learning 方法类。
+"""GRACE + MRL + Mutual Learning 方法类（v4 — 全 B×B 矩阵相似度 + 对称 KL）。
 
 继承自 GRACEWithMRLMethod，复用其 MRL 训练逻辑（数据增强、嵌入提取、
 多维度 GRACE 损失计算），在此基础上叠加互学习损失。
 
 损失公式：
-L_total = mrl_weight * (1/|M|) * sum(L_GRACE^i)
-        + ml_weight * (1/(|M|-1)) * sum(L_ML^{i-1,i})
+L_total = mrl_weight × (1/|M|) × Σ L_GRACE^i
+        + ml_weight × (1/(|M|-1)) × Σ L_ML^{i-1,i}
 
-其中：
-L_ML^{i-1,i} = mean(abs(State_{i-1} - State_i))
-State = 0.5 * (2 - p(u,v) - p(v,u))
+互学习损失（v4 — 全 B×B 跨视图相似度矩阵）：
+Step 1 — 计算两个视图归一化嵌入的 B×B 相似度矩阵：
+    S_i = z1_norm[:, :i] @ z2_norm[:, :i].T       →  (B, B)
+
+Step 2 — 拉平 + 温度缩放 + softmax：
+    S̃_i = softmax(flatten(S_i) / τ_ml)             →  (B²,)
+
+Step 3 — 对称 KL 散度：
+    L_ML^{i-1,i} = ½ [KL(S̃_{i-1} || S̃_i) + KL(S̃_i || S̃_{i-1})]
+
+与 v3（仅正样本对）的核心区别：
+    - v3 只取对角（B 个正样本对），softmax 后 B 维分布 → KL
+    - v4 取完整 B×B 矩阵（含所有正样本+负样本对），softmax 后 B² 维分布 → KL
+    - v4 衡量的不只是正样本对排序，而是整个跨视图相似度矩阵结构的一致性
 
 GRACE 损失计算与父类 GRACEWithMRLMethod 完全一致，
 均通过 self.model.nt_xent 调用，保证 ml_weight=0 时严格等价。
@@ -22,15 +33,19 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .grace_mrl_method import GRACEWithMRLMethod
-from .ML_module import MutualLearningLoss, compute_state
+from .ML_module import MutualLearningLoss
 
 
 class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
-    """GRACE + MRL + 互学习融合方法。
+    """GRACE + MRL + 互学习融合方法（v4 — 全 B×B 矩阵相似度 + 对称 KL）。
 
     继承自 GRACEWithMRLMethod，复用完整的 MRL 训练流程。
     GRACE 损失部分与父类调用同一个 self.model.nt_xent，
-    仅在此基础上额外计算 State 并叠加互学习损失。
+    仅在此基础上额外计算跨视图相似度矩阵并叠加互学习损失。
+
+    v4 与 v3 的唯一区别：ML 损失从仅正样本对 (B 维) 扩展为
+    完整跨视图相似度矩阵 (B² 维)，包含所有正样本 + 负样本对的相似度信息。
+
     ml_weight=0 时与 GRACEWithMRLMethod 严格等价。
     """
 
@@ -40,40 +55,50 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         mrl_dims: Sequence[int],
         mrl_weight: float = 1.0,
         ml_weight: float = 1.0,
+        tau_ml: float = 0.2,
         verbose: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, mrl_dims=mrl_dims, mrl_weight=mrl_weight, **kwargs)
         self.method_name = "grace_mrl_ml"
         self.ml_weight = float(ml_weight)
+        self.tau_ml = float(tau_ml)
         self.verbose = verbose
         self.ml_calculator = MutualLearningLoss(
-            mrl_dims=self.mrl_dims, ml_weight=ml_weight
+            mrl_dims=self.mrl_dims,
+            ml_weight=ml_weight,
+            tau_ml=tau_ml,
         )
         self.epoch = 0
 
     # ------------------------------------------------------------------
-    # 覆盖父类的损失计算方法，叠加互学习损失
+    # 覆盖父类的损失计算方法，叠加互学习损失（v4：全 B×B 矩阵 + 对称 KL）
     # ------------------------------------------------------------------
 
     def _grace_prefix_loss_with_details(
-        self, z1_full: Tensor, z2_full: Tensor
+        self,
+        z1_full: Tensor,
+        z2_full: Tensor,
     ) -> Tuple[Tensor, Dict[str, float]]:
-        """计算各维度 GRACE 损失 + 互学习损失。
+        """计算各维度 GRACE 损失 + 互学习损失（v4：全 B×B 矩阵）。
 
         GRACE 损失部分：与父类 GRACEWithMRLMethod 完全一致，
         通过 self.model.nt_xent 调用，保证计算结果严格等价。
 
-        State 计算：复用 nt_xent 中的 L2 归一化 + 相似度矩阵计算，
-        然后提取正样本对概率 → State → 互学习损失。
+        互学习损失部分（v4）：
+        直接传入完整投影器输出，由 MutualLearningLoss.compute()
+        内部处理：切片 → B×B 矩阵 → flatten → softmax → 对称 KL
+
+        参数:
+            z1_full: 第一视图的投影 embedding，形状 (B, proj_dim)
+            z2_full: 第二视图的投影 embedding，形状 (B, proj_dim)
+
+        返回:
+            total: 总损失标量
+            dim_losses: 各分量损失字典
         """
         dim_losses: Dict[str, float] = {}
         loss_sum = torch.zeros((), device=z1_full.device)
-
-        # 仅当 ml_weight > 0 时才计算 State，避免 ml_weight=0 时
-        # 额外的 autograd 节点影响 GRACE 损失的反向传播精度
-        compute_ml = self.ml_weight > 0.0
-        dim_states: Dict[str, Tensor] = {}
 
         for dim in self.mrl_dims:
             z1 = z1_full[:, :dim]
@@ -84,24 +109,16 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
             loss_sum = loss_sum + dim_loss
             dim_losses[f"dim_{dim}"] = float(dim_loss.detach().item())
 
-            # State 计算（仅 ml_weight > 0 时执行）
-            if compute_ml:
-                z1_norm = F.normalize(z1, dim=-1)
-                z2_norm = F.normalize(z2, dim=-1)
-                sim = torch.matmul(z1_norm, z2_norm.T) / self.model.tau
-                prob_u_v = F.softmax(sim, dim=1)
-                prob_v_u = F.softmax(sim.t(), dim=1)
-                idx = torch.arange(z1.size(0), device=z1.device)
-                p_u_v = prob_u_v[idx, idx]
-                p_v_u = prob_v_u[idx, idx]
-                dim_states[f"dim_{dim}"] = compute_state(p_u_v, p_v_u)
-
         # MRL 损失：与父类公式一致
         grace_loss_avg = loss_sum / len(self.mrl_dims)
         mrl_loss = self.mrl_weight * grace_loss_avg
 
-        # 互学习损失（ml_weight=0 时此项恒为 0，无额外 autograd 节点）
-        ml_loss = self.ml_calculator.compute(dim_states) if compute_ml else torch.zeros((), device=z1_full.device)
+        # 互学习损失（v4）：全 B×B 矩阵 → flatten → softmax → 对称 KL
+        ml_loss = (
+            self.ml_calculator.compute(z1_full, z2_full)
+            if self.ml_weight > 0.0
+            else torch.zeros((), device=z1_full.device)
+        )
 
         # 总损失
         total = mrl_loss + ml_loss
@@ -114,6 +131,7 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         return total, dim_losses
 
     # ------------------------------------------------------------------
-    # 训练步骤：继承父类逻辑（GRACE 损失 + 互学习损失已在 _grace_prefix_loss_with_details 中计算），
-    # 父类的 train_step 自动使用覆盖后的损失函数，无需额外 print。
+    # 训练步骤：继承父类逻辑（GRACE 损失 + 互学习损失已在
+    # _grace_prefix_loss_with_details 中计算），
+    # 父类的 train_step 自动使用覆盖后的损失函数，无需额外修改。
     # ------------------------------------------------------------------

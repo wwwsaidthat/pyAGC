@@ -647,6 +647,7 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             mrl_dims=mrl_dims,
             mrl_weight=args.mrl_weight,
             ml_weight=args.ml_weight,
+            tau_ml=args.mrl_tau,
             verbose=True,  # 默认开启 verbose 模式打印损失
         )
     raise ValueError(f"未知方法: {args.method}")

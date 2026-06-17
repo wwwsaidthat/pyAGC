@@ -1,132 +1,231 @@
-"""互学习损失计算模块。
+"""互学习损失计算模块（v4 — 全矩阵余弦相似度 + 对称 KL 散度）。
 
-负责计算 Mutual Learning 相关量：
-- 正样本对概率 p(u,v)、p(v,u)
-- 基于概率构造的 State
-- 各维度之间的互学习损失 L_ML
+实现公式（对每对相邻维度 i-1, i）：
 
-注意：GRACE (NT-Xent) 损失由 GRACECore.nt_xent 统一计算，
-本模块不再重复实现，保证与 grace_mrl 严格等价。
+Step 1 — 计算两个视图归一化嵌入的完整 B×B 相似度矩阵：
+    S_i = z1_norm @ z2_norm.T       →  (B, B)
+    对角元素 S_i[j,j] = 正样本对 (z1_j, z2_j) 的余弦相似度
+    非对角元素 S_i[j,k] = 负样本对 (z1_j, z2_k) 的余弦相似度
+
+Step 2 — 拉平 + 温度缩放 + softmax：
+    S̃_i = softmax(flatten(S_i) / τ_ml)       →  (B²,)
+
+Step 3 — 对称 KL 散度：
+    L_ML^{i-1,i} = ½ [KL(S̃_{i-1} || S̃_i) + KL(S̃_i || S̃_{i-1})]
+
+Step 4 — 总互学习损失：
+    L_ML = ml_weight × (1/(|M|-1)) × Σ_{i=1}^{|M|-1} L_ML^{i-1,i}
+
+与 v3（仅正样本对）的核心区别：
+    - v3 只取矩阵对角（B 个正样本对）的相似度，softmax 后得到 B 维分布
+    - v4 取完整 B×B 矩阵（含所有正样本 + 负样本对），softmax 后得到 B² 维分布，
+      衡量的是"整个跨视图相似度矩阵结构"在相邻维度间的一致性
 """
 
-from typing import Dict, Sequence, Tuple
+from typing import Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 
-def compute_positive_pair_probs(z1: Tensor, z2: Tensor, tau: float) -> Tuple[Tensor, Tensor]:
-    """计算双向正样本对概率 p(u,v) 与 p(v,u)。
+# ============================================================================
+# Step 1: 完整 B×B 跨视图相似度矩阵
+# ============================================================================
 
-    不负责 GRACE/NT-Xent 主损失，只从相似度矩阵中提取
-    互学习所需的正样本概率。
-    """
-    import torch.nn.functional as F
+def compute_cross_view_similarity_matrix(z1: Tensor, z2: Tensor, eps: float = 1e-8) -> Tensor:
+    r"""计算两个视图归一化嵌入的完整 B×B 相似度矩阵。
 
-    z1 = F.normalize(z1, dim=-1)
-    z2 = F.normalize(z2, dim=-1)
-
-    batch_size = z1.size(0)
-    sim = torch.matmul(z1, z2.T) / tau
-
-    prob_u_v = F.softmax(sim, dim=1)
-    prob_v_u = F.softmax(sim.t(), dim=1)
-    idx = torch.arange(batch_size, device=z1.device)
-    p_u_v = prob_u_v[idx, idx]
-    p_v_u = prob_v_u[idx, idx]
-
-    return p_u_v, p_v_u
-
-
-def compute_state(p_u_v: Tensor, p_v_u: Tensor) -> Tensor:
-    """计算 State 值。
-
-    State 表示样本对的对比学习置信度，范围 [0, 1]。
-    State 越接近 1 表示模型对该样本对的判别越自信。
+    S[j,k] = cosine_sim(z1_j, z2_k)
+           = (z1_j · z2_k) / (||z1_j|| · ||z2_k||)
 
     参数:
-        p_u_v: p(u, v) 概率向量 (batch_size,)
-        p_v_u: p(v, u) 概率向量 (batch_size,)
+        z1: 第一视图的 embedding，形状 (B, D)
+        z2: 第二视图的 embedding，形状 (B, D)
+        eps: 归一化数值稳定项
 
     返回:
-        state: State 值向量 (batch_size,)
+        S: B×B 相似度矩阵
     """
-    return 0.5 * (2 - p_u_v - p_v_u)
+    z1_norm = F.normalize(z1, p=2, dim=-1, eps=eps)
+    z2_norm = F.normalize(z2, p=2, dim=-1, eps=eps)
+    S = z1_norm @ z2_norm.T  # (B, B)
+    return S
 
 
-def compute_mutual_learning_loss(
-    dim_states: Dict[str, Tensor],
-    mrl_dims: Sequence[int],
-    ml_weight: float = 1.0,
-) -> Tensor:
-    """计算维度间的互学习损失。
+# ============================================================================
+# Step 2: 温度缩放 + softmax（在拉平后的 B² 向量上操作）
+# ============================================================================
 
-    鼓励高维模型学习低维模型的表示能力，通过约束 State 值实现。
+def temperature_softmax(logits: Tensor, tau_ml: float) -> Tensor:
+    r"""温度缩放后做 softmax，将任意形状的 logits 转化为概率分布。
+
+    prob = softmax(logits / tau_ml)
 
     参数:
-        dim_states: 各维度的 State 字典 {dim_str: state_tensor}
-        mrl_dims: MRL 维度列表
+        logits: 任意形状的 Tensor，会被自动视为一维参与 softmax
+        tau_ml: 温度系数，控制分布的尖锐程度
+            - tau_ml → 0+: 分布趋向 one-hot
+            - tau_ml → ∞:  分布趋向均匀
+            - tau_ml = 1:   标准 softmax
+
+    返回:
+        prob: softmax 概率分布，与 logits 同形状；sum(prob) = 1
+    """
+    prob = F.softmax(logits / tau_ml, dim=-1)
+    return prob
+
+
+# ============================================================================
+# Step 3: 对称 KL 散度
+# ============================================================================
+
+def symmetric_kl_divergence(p: Tensor, q: Tensor, eps: float = 1e-12) -> Tensor:
+    r"""计算两个概率分布之间的对称 KL 散度。
+
+    L_ML^{i-1,i} = ½ [KL(p || q) + KL(q || p)]
+
+    参数:
+        p: 第一个概率分布，任意形状；要求 sum(p) ≈ 1
+        q: 第二个概率分布，任意形状；要求 sum(q) ≈ 1
+        eps: 数值稳定项，对概率做 clamp 防止 log(0)
+
+    返回:
+        loss: 对称 KL 散度标量
+    """
+    p_clamp = p.clamp(min=eps)
+    q_clamp = q.clamp(min=eps)
+
+    kl_pq = (p * (p_clamp.log() - q_clamp.log())).sum()
+    kl_qp = (q * (q_clamp.log() - p_clamp.log())).sum()
+
+    loss = 0.5 * (kl_pq + kl_qp)
+    return loss
+
+
+# ============================================================================
+# Step 4: 完整互学习损失 pipeline（v4 — 全矩阵 B×B）
+# ============================================================================
+
+def compute_mutual_learning_loss_v4(
+    z1_full: Tensor,
+    z2_full: Tensor,
+    mrl_dims: Sequence[int],
+    tau_ml: float,
+    ml_weight: float = 1.0,
+) -> Tensor:
+    r"""完整的互学习损失计算 pipeline（v4 — 全矩阵 B×B 相似度）。
+
+    对每对相邻维度 (i-1, i):
+    1. 切片 z[:, :dim]，计算 B×B 跨视图相似度矩阵
+    2. 拉平 → 温度缩放 softmax → B² 维概率分布
+    3. 对称 KL 散度
+
+    总损失 = ml_weight × 均值(所有相邻对的对称 KL)
+
+    内存优化：逐对处理相邻维度，始终只持有 2 个 B² 向量。
+
+    参数:
+        z1_full: 第一视图的完整 embedding，形状 (B, proj_dim)
+        z2_full: 第二视图的完整 embedding，形状 (B, proj_dim)
+        mrl_dims: MRL 维度列表，例如 [64, 128, 256, 512]
+        tau_ml: 互学习温度系数
         ml_weight: 互学习损失权重
 
     返回:
-        ml_loss: 互学习损失标量
+        ml_loss: 互学习损失标量（已包含 ml_weight）
     """
     if not mrl_dims or len(mrl_dims) < 2:
-        if dim_states:
-            device = next(iter(dim_states.values())).device
-            return torch.zeros((), device=device)
-        return torch.tensor(0.0)
+        return torch.zeros((), device=z1_full.device)
 
     sorted_dims = sorted(mrl_dims)
-    first_dim = sorted_dims[0]
-    device = dim_states[f"dim_{first_dim}"].device
-    ml_loss = torch.zeros((), device=device)
+    ml_sum = torch.zeros((), device=z1_full.device)
+
+    # 先算第一个维度的 B×B 矩阵 → flatten → softmax
+    prev_z1 = z1_full[:, :sorted_dims[0]]
+    prev_z2 = z2_full[:, :sorted_dims[0]]
+    prev_S = compute_cross_view_similarity_matrix(prev_z1, prev_z2)  # (B, B)
+    prev_prob = temperature_softmax(prev_S.flatten(), tau_ml)         # (B²,)
 
     for i in range(1, len(sorted_dims)):
-        dim_prev = sorted_dims[i - 1]
-        dim_curr = sorted_dims[i]
+        dim = sorted_dims[i]
+        curr_z1 = z1_full[:, :dim]
+        curr_z2 = z2_full[:, :dim]
+        curr_S = compute_cross_view_similarity_matrix(curr_z1, curr_z2)  # (B, B)
+        curr_prob = temperature_softmax(curr_S.flatten(), tau_ml)        # (B²,)
 
-        state_prev = dim_states[f"dim_{dim_prev}"]
-        state_curr = dim_states[f"dim_{dim_curr}"]
+        # 对称 KL：prev_prob vs curr_prob
+        loss_pair = symmetric_kl_divergence(prev_prob, curr_prob)
+        ml_sum = ml_sum + loss_pair
 
-        ml_loss = ml_loss + torch.abs(state_prev - state_curr).mean()
+        # 释放 prev，复用为下一轮
+        prev_prob = curr_prob
 
-    return ml_weight * ml_loss / (len(sorted_dims) - 1)
+    # 取均值 × 权重
+    ml_loss = ml_weight * ml_sum / (len(sorted_dims) - 1)
+    return ml_loss
 
+
+# ============================================================================
+# MutualLearningLoss 类（高级接口）
+# ============================================================================
 
 class MutualLearningLoss:
-    """互学习损失计算器类。
+    r"""互学习损失计算器（v4 — 全 B×B 矩阵余弦相似度 + 对称 KL 散度）。
 
-    提供更高级的接口，便于在不同模型中复用。
+    提供面向对象的接口，便于在 GRACE+MRL+ML 等方法中复用。
 
     使用示例:
-        ml_calculator = MutualLearningLoss(mrl_dims=[128, 256, 512], ml_weight=5.0)
+        ml_calculator = MutualLearningLoss(
+            mrl_dims=[64, 128, 256, 512],
+            ml_weight=5.0,
+            tau_ml=0.5,
+        )
 
-        # 已有各维度 State 时直接计算 ML 损失
-        ml_loss = ml_calculator.compute(dim_states)
+        # 直接传入完整投影器输出
+        ml_loss = ml_calculator.compute(z1_full, z2_full)
     """
 
-    def __init__(self, mrl_dims: Sequence[int], ml_weight: float = 1.0):
+    def __init__(
+        self,
+        mrl_dims: Sequence[int],
+        ml_weight: float = 1.0,
+        tau_ml: float = 0.5,
+    ):
         """
         参数:
-            mrl_dims: MRL 维度列表
+            mrl_dims: MRL 维度列表，例如 [64, 128, 256, 512]
             ml_weight: 互学习损失权重
+            tau_ml: 互学习温度系数，控制 softmax 的尖锐程度
+                - 越小 → 分布越尖锐（只关注最相似/最不相似的节点）
+                - 越大 → 分布越平滑（所有节点等权）
+                - 建议范围: 0.1 ~ 1.0
         """
         self.mrl_dims = sorted({int(d) for d in mrl_dims})
         self.ml_weight = ml_weight
+        self.tau_ml = tau_ml
 
         if len(self.mrl_dims) < 2:
             import warnings
+            warnings.warn(
+                f"mrl_dims 维度少于 2 个（当前 {len(self.mrl_dims)} 个），"
+                f"互学习损失将恒为 0"
+            )
 
-            warnings.warn("mrl_dims 维度少于2个，互学习损失将恒为0")
-
-    def compute(self, dim_states: Dict[str, Tensor]) -> Tensor:
-        """从已有的各维度 State 计算互学习损失。
+    def compute(self, z1_full: Tensor, z2_full: Tensor) -> Tensor:
+        r"""从投影器输出计算互学习损失（v4 — 全 B×B 矩阵）。
 
         参数:
-            dim_states: 各维度的 State 字典，key 为 "dim_{dim}" 格式
+            z1_full: 第一视图的投影 embedding，形状 (B, proj_dim)
+            z2_full: 第二视图的投影 embedding，形状 (B, proj_dim)
 
         返回:
             ml_loss: 互学习损失标量（已包含 ml_weight）
         """
-        return compute_mutual_learning_loss(dim_states, self.mrl_dims, self.ml_weight)
+        return compute_mutual_learning_loss_v4(
+            z1_full=z1_full,
+            z2_full=z2_full,
+            mrl_dims=self.mrl_dims,
+            tau_ml=self.tau_ml,
+            ml_weight=self.ml_weight,
+        )
