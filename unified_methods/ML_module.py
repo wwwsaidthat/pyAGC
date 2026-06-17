@@ -72,7 +72,8 @@ def temperature_softmax(logits: Tensor, tau_ml: float) -> Tensor:
     返回:
         prob: softmax 概率分布，与 logits 同形状；sum(prob) = 1
     """
-    prob = F.softmax(logits / tau_ml, dim=-1)
+    # prob = F.softmax(logits / tau_ml, dim=-1)
+    prob = F.relu(logits)
     return prob
 
 
