@@ -78,20 +78,6 @@ default:
 # Dataset-specific configurations
 # ============================================================================
 
-Cora:
-  mini_batch: false
-  gnn_type: gcn
-  force_full_batch_inference: true
-  allow_cpu_fallback: true
-  epochs: 50
-  hidden_channels: 512
-  num_layers: 2
-  norm: none
-  lam: 0.001
-  p_fm1: 0.1
-  p_ed1: 0.4
-  p_fm2: 0.1
-  p_ed2: 0.4
 
 
 ArXiv:

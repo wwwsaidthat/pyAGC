@@ -174,11 +174,6 @@ def get_training_config(dataset: str, config_path: str = 'train.conf.yaml') -> d
             num_layers: 2
             dropout: 0.5
 
-        Cora:
-          learning_rate: 0.01
-          model:
-            num_layers: 3
-
         CiteSeer:
           hidden_dim: 256
 
@@ -201,11 +196,11 @@ def get_training_config(dataset: str, config_path: str = 'train.conf.yaml') -> d
         >>> # default:
         >>> #   lr: 0.001
         >>> #   hidden: 128
-        >>> # Cora:
-        >>> #   lr: 0.01
-        >>> config = get_training_config('Cora')
+        >>> # CiteSeer:
+        >>> #   hidden: 256
+        >>> config = get_training_config('CiteSeer')
         >>> print(config)
-        {'lr': 0.01, 'hidden': 128}
+        {'lr': 0.001, 'hidden': 256}
 
     Note:
         - If the dataset is not found in the config file, only default

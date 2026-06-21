@@ -20,7 +20,7 @@ def get_dataset(name: str, root: str, return_splits=False):
 
     This function serves as a unified interface for loading a wide range of
     benchmark datasets used in graph learning, including both classical
-    citation networks (e.g., Cora, PubMed) and large-scale Open Graph
+    citation networks (e.g., CiteSeer, PubMed) and large-scale Open Graph
     Benchmark (OGB) datasets (e.g., ogbn-arxiv, ogbn-products). It
     automatically normalizes node features, converts the graph to an
     undirected version.
@@ -30,7 +30,7 @@ def get_dataset(name: str, root: str, return_splits=False):
 
     Args:
         name (str): The name of the dataset to load. Supported options include:
-            :obj:`['cora', 'citeseer', 'pubmed', 'corafull', 'photo', 'computers',
+            :obj:`['citeseer', 'pubmed', 'corafull', 'photo', 'computers',
             'cs', 'physics', 'flickr', 'reddit', 'reddit2', 'ogbn-arxiv', 'arxiv',
             'ogbn-mag', 'mag', 'ogbn-products', 'products', 'ogbn-papers100M',
             'papers100m', 'hm-categories', 'hm', 'pokec-regions', 'pokec',
@@ -64,7 +64,7 @@ def get_dataset(name: str, root: str, return_splits=False):
     if name in ['ogbn-papers100M', 'papers100m']:
         return _load_papers100m(root, return_splits)
 
-    if name in ['cora', 'citeseer', 'pubmed']:
+    if name in ['citeseer', 'pubmed']:
         dataset = Planetoid(root=root, name=name, transform=T.NormalizeFeatures())
     elif name in ['corafull']:
         dataset = CoraFull(f'{root}/{name}', transform=T.NormalizeFeatures())

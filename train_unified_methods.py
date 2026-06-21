@@ -354,9 +354,7 @@ def _assert_dir_non_empty(path: Path, desc: str) -> None:
 def ensure_local_dataset_ready(dataset: str, root: str) -> None:
     """校验本地数据目录，防止触发下载。"""
     root_path = Path(root).resolve()
-    if dataset == "cora":
-        _assert_dir_non_empty(root_path / "Cora", "Cora 数据目录")
-    elif dataset == "arxiv":
+    if dataset == "arxiv":
         _assert_dir_non_empty(root_path / "ogbn_arxiv", "ogbn-arxiv 数据目录")
     elif dataset == "products":
         _assert_dir_non_empty(root_path / "ogbn_products", "ogbn-products 数据目录")
@@ -421,7 +419,7 @@ def auto_mode(dataset: str, mode: str) -> str:
     """自动选择 full/neighbor。"""
     if mode != "auto":
         return mode
-    return "full" if dataset == "cora" else "neighbor"
+    return "neighbor"
 
 
 # ============================================================================
@@ -1275,7 +1273,7 @@ def parse_args() -> argparse.Namespace:
             "grace_ml",
         ],
     )
-    p.add_argument("--dataset", type=str, required=True, choices=["cora", "arxiv", "reddit2", "products", "mag"])
+    p.add_argument("--dataset", type=str, required=True, choices=["arxiv", "reddit2", "products", "mag"])
     p.add_argument("--root", type=str, default="./data")
     p.add_argument("--mode", type=str, default="auto", choices=["auto", "full", "neighbor"])
     p.add_argument("--gpu-id", type=str, default="auto", help="auto/cpu/0/1...")
