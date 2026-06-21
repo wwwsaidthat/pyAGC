@@ -4,7 +4,7 @@
 
 > 本仓库由于 **GitHub 单文件 100MB 限制** 及 **Git LFS 配额限制**，**无法直接上传核心数据文件**。这意味着您克隆仓库后**无法直接运行项目**，必须先完成下方【数据补全部署】章节的数据准备步骤。
 > 
-> 缺失的数据文件总体积约 **2.9 GB**，包含图神经网络训练所需的预处理数据、特征文件和划分索引。
+> 缺失的数据文件总体积约 **4.4 GB**，包含图神经网络训练所需的预处理数据、特征文件和划分索引。
 
 ---
 
@@ -36,7 +36,7 @@ PyAGC 是一个基于 **PyTorch** 与 **PyTorch Geometric** 的属性图聚类�
 - 支持多种图自监督学习方法（DGI、CCA-SSG、GRACE 等）
 - 支持 MRL（Matryoshka Representation Learning）融合版本
 - 提供统一的训练和评估流水线
-- 支持多种图数据集（Cora、ogbn-arxiv、ogbn-products、reddit2）
+- 支持多种图数据集（ogbn-arxiv、ogbn-products、reddit2、ogbn-mag）
 
 ---
 
@@ -171,7 +171,6 @@ pip install -e ".[dev]"
 | ogbn-arxiv | `data/ogbn_arxiv/processed/geometric_data_processed.pt` | ~103 MB | 预处理后的图数据 |
 | ogbn-arxiv | `data/ogbn_arxiv/raw/node-feat.csv.gz` | ~72 MB | 原始节点特征 |
 | ogbn-arxiv | `data/ogbn_arxiv/raw/edge.csv.gz` | ~48 MB | 原始边列表 |
-| Cora | `data/Cora/processed/data.pt` | ~15 MB | 预处理数据 |
 | **总计** | - | **~4.5 GB** | - |
 
 ### 数据获取方式
@@ -229,20 +228,6 @@ mkdir -p data
 
 ```text
 data/
-├── Cora/
-│   ├── processed/
-│   │   ├── data.pt
-│   │   ├── pre_filter.pt
-│   │   └── pre_transform.pt
-│   └── raw/
-│       ├── ind.cora.x
-│       ├── ind.cora.tx
-│       ├── ind.cora.allx
-│       ├── ind.cora.y
-│       ├── ind.cora.ty
-│       ├── ind.cora.ally
-│       ├── ind.cora.graph
-│       └── ind.cora.test.index
 ├── ogbn_arxiv/
 │   ├── processed/
 │   │   ├── geometric_data_processed.pt
@@ -284,7 +269,6 @@ data/
 # 检查文件是否存在
 ls -lh data/ogbn_products/processed/geometric_data_processed.pt
 ls -lh data/ogbn_arxiv/processed/geometric_data_processed.pt
-ls -lh data/Cora/processed/data.pt
 ```
 
 ---
@@ -304,15 +288,15 @@ print('✅ 包导入成功！')
 "
 ```
 
-### 验证 2：小规模数据集测试（Cora）
+### 验证 2：小规模数据集测试
 
 ```bash
-# 测试监督式 GCN
+# 测试监督式 GCN（使用 ogbn-arxiv）
 python train_unified_methods.py \
   --method gcn \
-  --dataset cora \
+  --dataset arxiv \
   --root ./data \
-  --mode full \
+  --mode neighbor \
   --gpu-id auto \
   --supervised-epochs 10
 ```
@@ -408,7 +392,7 @@ docker run --gpus all -it pyagc:latest
 1. **数据文件不在 Git 管理中**：根目录 `data/` 已通过 `.gitignore` 排除，无法通过 `git clone` 获取
 2. **首次运行前必须准备数据**：否则会报错 `FileNotFoundError`
 3. **数据版本兼容性**：使用 OGB 官方工具下载的数据与本项目兼容
-4. **磁盘空间**：确保至少有 **5GB** 可用空间（数据 2.9GB + 运行缓存）
+4. **磁盘空间**：确保至少有 **8GB** 可用空间（数据 ~4.4GB + 运行缓存）
 
 ### 运行相关
 
@@ -423,7 +407,7 @@ docker run --gpus all -it pyagc:latest
 ### 常见问题
 
 **Q: 克隆仓库后为什么不能直接运行？**  
-A: 因为数据文件（约 2.9GB）超过了 GitHub 的文件大小限制，无法上传。请参考【数据补全部署】章节获取数据。
+A: 因为数据文件（约 4.4GB）超过了 GitHub 的文件大小限制，无法上传。请参考【数据补全部署】章节获取数据。
 
 **Q: 可以使用 CPU 运行吗？**  
 A: 可以，但速度较慢。使用 `--gpu-id cpu` 参数指定 CPU 运行。
