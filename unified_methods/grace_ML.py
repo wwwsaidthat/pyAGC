@@ -3,7 +3,14 @@
 继承自 GRACEWithMRLMethod，复用其 MRL 训练逻辑（数据增强、嵌入提取、
 多维度 GRACE 损失计算），在此基础上叠加互学习损失。
 
-损失公式：
+训练策略（两阶段）：
+    - 第一阶段（1 ~ grace_only_epochs）：仅训练 GRACE+MRL 损失，
+      让各维度子空间先学到有意义的表示。
+    - 第二阶段（grace_only_epochs+1 ~ grace_only_epochs+grace_ml_epochs）：
+      加入互学习损失，在已学到的表示基础上，
+      鼓励相邻维度子空间产生一致的相似度结构。
+
+损失公式（第二阶段）：
 L_total = mrl_weight × (1/|M|) × Σ L_GRACE^i
         + ml_weight × (1/(|M|-1)) × Σ L_ML^{i-1,i}
 
@@ -43,6 +50,13 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
     GRACE 损失部分与父类调用同一个 self.model.nt_xent，
     仅在此基础上额外计算跨视图相似度矩阵并叠加互学习损失。
 
+    训练策略（两阶段）：
+        - 第一阶段（1 ~ grace_only_epochs）：仅训练 GRACE+MRL 损失，
+          让各维度子空间先学到有意义的表示，互学习损失置零。
+        - 第二阶段（grace_only_epochs+1 ~ grace_only_epochs+grace_ml_epochs）：
+          加入互学习损失，在已学到的表示基础上，
+          鼓励相邻维度子空间产生一致的相似度结构。
+
     v4 与 v3 的唯一区别：ML 损失从仅正样本对 (B 维) 扩展为
     完整跨视图相似度矩阵 (B² 维)，包含所有正样本 + 负样本对的相似度信息。
 
@@ -56,6 +70,9 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         mrl_weight: float = 1.0,
         ml_weight: float = 1.0,
         tau_ml: float = 0.2,
+        grace_only_epochs: int = 100,
+        grace_ml_epochs: int = 100,
+        ml_module: str = "ml",
         verbose: bool = False,
         **kwargs,
     ) -> None:
@@ -63,12 +80,24 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         self.method_name = "grace_mrl_ml"
         self.ml_weight = float(ml_weight)
         self.tau_ml = float(tau_ml)
+        self.grace_only_epochs = int(grace_only_epochs)
+        self.grace_ml_epochs = int(grace_ml_epochs)
+        self.ml_module = ml_module
         self.verbose = verbose
-        self.ml_calculator = MutualLearningLoss(
-            mrl_dims=self.mrl_dims,
-            ml_weight=ml_weight,
-            tau_ml=tau_ml,
-        )
+
+        if ml_module == "ml2":
+            from .ML_module2 import MutualLearningLoss2
+            self.ml_calculator = MutualLearningLoss2(
+                mrl_dims=self.mrl_dims,
+                ml_weight=ml_weight,
+                tau_ml=tau_ml,
+            )
+        else:
+            self.ml_calculator = MutualLearningLoss(
+                mrl_dims=self.mrl_dims,
+                ml_weight=ml_weight,
+                tau_ml=tau_ml,
+            )
         self.epoch = 0
 
     # ------------------------------------------------------------------
@@ -80,10 +109,14 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         z1_full: Tensor,
         z2_full: Tensor,
     ) -> Tuple[Tensor, Dict[str, float]]:
-        """计算各维度 GRACE 损失 + 互学习损失（v4：全 B×B 矩阵）。
+        """计算各维度 GRACE 损失 + 互学习损失（v4：全 B×B 矩阵，两阶段训练）。
 
         GRACE 损失部分：与父类 GRACEWithMRLMethod 完全一致，
         通过 self.model.nt_xent 调用，保证计算结果严格等价。
+
+        两阶段训练策略：
+        - 第一阶段（epoch <= grace_only_epochs）：ml_loss = 0，仅训练 GRACE+MRL
+        - 第二阶段（epoch > grace_only_epochs）：加入互学习损失
 
         互学习损失部分（v4）：
         直接传入完整投影器输出，由 MutualLearningLoss.compute()
@@ -113,12 +146,11 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         grace_loss_avg = loss_sum / len(self.mrl_dims)
         mrl_loss = self.mrl_weight * grace_loss_avg
 
-        # 互学习损失（v4）：全 B×B 矩阵 → flatten → softmax → 对称 KL
-        ml_loss = (
-            self.ml_calculator.compute(z1_full, z2_full)
-            if self.ml_weight > 0.0
-            else torch.zeros((), device=z1_full.device)
-        )
+        # 第一阶段只训练 GRACE（无互学习损失），第二阶段再加入互学习损失
+        if self.epoch > self.grace_only_epochs and self.ml_weight > 0.0:
+            ml_loss = self.ml_calculator.compute(z1_full, z2_full)
+        else:
+            ml_loss = torch.zeros((), device=z1_full.device)
 
         # 总损失
         total = mrl_loss + ml_loss

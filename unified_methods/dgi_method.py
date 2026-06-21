@@ -18,13 +18,6 @@ class DGIMethod(BaseMethod):
 
     def __init__(self, in_dim: int, hidden_dim: int, num_layers: int, dropout: float) -> None:
         super().__init__(method_name="dgi", is_supervised=False)
-        # encoder = GCN(
-        #     in_channels=in_dim,
-        #     hidden_channels=hidden_dim,
-        #     out_channels=hidden_dim,
-        #     num_layers=1,
-        #     dropout=dropout,
-        # )
         encoder = TunedGCN(
             in_channels=in_dim,
             hidden_channels=hidden_dim,

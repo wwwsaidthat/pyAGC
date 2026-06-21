@@ -648,6 +648,9 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             mrl_weight=args.mrl_weight,
             ml_weight=args.ml_weight,
             tau_ml=args.mrl_tau,
+            grace_only_epochs=args.grace_only_epochs,
+            grace_ml_epochs=args.grace_ml_epochs,
+            ml_module=args.ml_module,
             verbose=True,  # 默认开启 verbose 模式打印损失
         )
     raise ValueError(f"未知方法: {args.method}")
@@ -880,7 +883,19 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
             # 更新 epoch（用于 verbose 模式打印）
             if hasattr(method, "epoch"):
                 method.epoch = ep
-            
+
+            # grace_ML 两阶段：进入 ML 阶段时切换学习率
+            if (args.method == "grace_ml"
+                    and args.grace_ml_lr is not None
+                    and ep == args.grace_only_epochs + 1):
+                for pg in optimizer.param_groups:
+                    pg["lr"] = float(args.grace_ml_lr)
+                logger.info(
+                    "ML 阶段开始 | lr 切换: %.6f -> %.6f",
+                    float(args.pretrain_lr),
+                    float(args.grace_ml_lr),
+                )
+
             if mode == "full":
                 loss = method.ssl_train_step_full(data, device, optimizer)
             else:
@@ -1279,7 +1294,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--p-edge-drop-2", type=float, default=0.4)
 
     p.add_argument("--pretrain-epochs", type=int, default=200)
+    p.add_argument("--grace-only-epochs", type=int, default=None,
+                   help="grace_ML 第一阶段（纯 GRACE）训练轮数；未设置时取 pretrain-epochs 的一半")
+    p.add_argument("--grace-ml-epochs", type=int, default=None,
+                   help="grace_ML 第二阶段（GRACE+ML）训练轮数；未设置时取 pretrain-epochs 的一半")
     p.add_argument("--pretrain-lr", type=float, default=1e-3)
+    p.add_argument("--grace-ml-lr", type=float, default=None,
+                   help="grace_ML 第二阶段（ML）学习率；未设置时沿用 pretrain-lr")
     p.add_argument("--pretrain-weight-decay", type=float, default=0.0)
     p.add_argument("--pretrain-input", type=str, default="all", choices=["all", "train"])
     p.add_argument("--pretrain-early-stop", action="store_true", help="自监督预训练按 loss 提前停止")
@@ -1312,6 +1333,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mrl-tau", type=float, default=0.5)
     p.add_argument("--mrl-weight", type=float, default=1.0)
     p.add_argument("--ml-weight", type=float, default=5.0, help="互学习损失权重")
+    p.add_argument("--ml-module", type=str, default="ml", choices=["ml", "ml2"],
+                   help="互学习模块版本: ml=相邻维度互学习, ml2=所有维度向最高维学习")
 
     p.add_argument("--pca-dims", type=str, default=None,
                    help="PCA基线：逗号分隔的目标维度，例如 32,64,128。训练hidden_dim后PCA降维并评估每维度5次")
@@ -1333,6 +1356,18 @@ def main() -> None:
     """程序入口。"""
     try:
         args = parse_args()
+
+        # grace_ML 两阶段 epoch 处理：支持显式指定两个阶段的训练轮数
+        if args.grace_only_epochs is not None or args.grace_ml_epochs is not None:
+            goe = args.grace_only_epochs if args.grace_only_epochs is not None else args.pretrain_epochs // 2
+            gme = args.grace_ml_epochs if args.grace_ml_epochs is not None else args.pretrain_epochs // 2
+            args.grace_only_epochs = goe
+            args.grace_ml_epochs = gme
+            args.pretrain_epochs = goe + gme
+        else:
+            args.grace_only_epochs = args.pretrain_epochs // 2
+            args.grace_ml_epochs = args.pretrain_epochs - args.grace_only_epochs
+
         enable_torch26_compat()
         bundle = load_dataset(args.dataset, args.root, logger=None)  # logger 尚未初始化，先 None
 
