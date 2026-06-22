@@ -668,7 +668,7 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             ml_weight=args.ml_weight,
             ml_module=args.ml_module,
             hpem_beta_init=args.hpem_beta_init,
-            das_tau_0=args.das_tau_0,
+            hpem_tau_0=args.hpem_tau_0,
             warmup_epochs=args.grace_only_epochs,
             full_epochs=args.grace_ml_epochs,
             verbose=True,
@@ -1357,8 +1357,8 @@ def parse_args() -> argparse.Namespace:
                    help="互学习模块版本: ml=相邻维度互学习, ml2=所有维度向最高维学习")
     p.add_argument("--hpem-beta-init", type=float, default=0.1,
                    help="HPEM 的 β 参数初始值（可学习）")
-    p.add_argument("--das-tau-0", type=float, default=0.5,
-                   help="DAS 基础温度 τ_0")
+    p.add_argument("--hpem-tau-0", type=float, default=0.5,
+                   help="HPEM 基础温度 τ_0")
 
     p.add_argument("--pca-dims", type=str, default=None,
                    help="PCA基线：逗号分隔的目标维度，例如 32,64,128。训练hidden_dim后PCA降维并评估每维度5次")
