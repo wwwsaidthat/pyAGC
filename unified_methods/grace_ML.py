@@ -69,7 +69,6 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         mrl_dims: Sequence[int],
         mrl_weight: float = 1.0,
         ml_weight: float = 1.0,
-        tau_ml: float = 0.2,
         grace_only_epochs: int = 100,
         grace_ml_epochs: int = 100,
         ml_module: str = "ml",
@@ -79,7 +78,6 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         super().__init__(*args, mrl_dims=mrl_dims, mrl_weight=mrl_weight, **kwargs)
         self.method_name = "grace_mrl_ml"
         self.ml_weight = float(ml_weight)
-        self.tau_ml = float(tau_ml)
         self.grace_only_epochs = int(grace_only_epochs)
         self.grace_ml_epochs = int(grace_ml_epochs)
         self.ml_module = ml_module
@@ -90,13 +88,11 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
             self.ml_calculator = MutualLearningLoss2(
                 mrl_dims=self.mrl_dims,
                 ml_weight=ml_weight,
-                tau_ml=tau_ml,
             )
         else:
             self.ml_calculator = MutualLearningLoss(
                 mrl_dims=self.mrl_dims,
                 ml_weight=ml_weight,
-                tau_ml=tau_ml,
             )
         self.epoch = 0
 

@@ -9,6 +9,7 @@ from .gcn_supervised_method import SupervisedGCNMethod
 from .grace_method import GRACEMethod
 from .grace_mrl_method import GRACEWithMRLMethod
 from .grace_ML import GRACEWithMRLMutualLearningMethod
+from .csne_method import CSNEMethod
 
 __all__ = [
     "BaseMethod",
@@ -20,4 +21,5 @@ __all__ = [
     "CCASSGWithMRLMethod",
     "GRACEWithMRLMethod",
     "GRACEWithMRLMutualLearningMethod",
+    "CSNEMethod",
 ]

@@ -57,22 +57,21 @@ def compute_cross_view_similarity_matrix(z1: Tensor, z2: Tensor, eps: float = 1e
 # Step 2: 温度缩放 + softmax（在拉平后的 B² 向量上操作）
 # ============================================================================
 
-def temperature_softmax(logits: Tensor, tau_ml: float) -> Tensor:
-    r"""温度缩放后做 softmax，将任意形状的 logits 转化为概率分布。
+def temperature_softmax(logits: Tensor) -> Tensor:
+    r"""将 logits 转化为非负值（ReLU），保留正相似度、抑制负相似度。
 
-    prob = softmax(logits / tau_ml)
+    prob = ReLU(logits)
+
+    与原始 softmax 的区别：
+        - ReLU 直接截断负值，不做归一化，保留原始量级
+        - 避免 softmax 的归一化迫使所有值参与竞争
 
     参数:
-        logits: 任意形状的 Tensor，会被自动视为一维参与 softmax
-        tau_ml: 温度系数，控制分布的尖锐程度
-            - tau_ml → 0+: 分布趋向 one-hot
-            - tau_ml → ∞:  分布趋向均匀
-            - tau_ml = 1:   标准 softmax
+        logits: 任意形状的 Tensor
 
     返回:
-        prob: softmax 概率分布，与 logits 同形状；sum(prob) = 1
+        prob: 非负值，与 logits 同形状
     """
-    # prob = F.softmax(logits / tau_ml, dim=-1)
     prob = F.relu(logits)
     return prob
 
@@ -117,14 +116,13 @@ def compute_mutual_learning_loss_v4(
     z1_full: Tensor,
     z2_full: Tensor,
     mrl_dims: Sequence[int],
-    tau_ml: float,
     ml_weight: float = 1.0,
 ) -> Tensor:
-    r"""完整的互学习损失计算 pipeline（v4 — 全矩阵 B×B 相似度）。
+    r"""完整的互学习损失计算 pipeline（v4 — 全矩阵 B×B 相似度，ReLU 激活）。
 
     对每对相邻维度 (i-1, i):
     1. 切片 z[:, :dim]，计算 B×B 跨视图相似度矩阵
-    2. 拉平 → 温度缩放 softmax → B² 维概率分布
+    2. 拉平 → ReLU → B² 维非负值
     3. 对称 KL 散度
 
     总损失 = ml_weight × 均值(所有相邻对的对称 KL)
@@ -135,7 +133,6 @@ def compute_mutual_learning_loss_v4(
         z1_full: 第一视图的完整 embedding，形状 (B, proj_dim)
         z2_full: 第二视图的完整 embedding，形状 (B, proj_dim)
         mrl_dims: MRL 维度列表，例如 [64, 128, 256, 512]
-        tau_ml: 互学习温度系数
         ml_weight: 互学习损失权重
 
     返回:
@@ -147,18 +144,18 @@ def compute_mutual_learning_loss_v4(
     sorted_dims = sorted(mrl_dims)
     ml_sum = torch.zeros((), device=z1_full.device)
 
-    # 先算第一个维度的 B×B 矩阵 → flatten → softmax
+    # 先算第一个维度的 B×B 矩阵 → flatten → ReLU
     prev_z1 = z1_full[:, :sorted_dims[0]]
     prev_z2 = z2_full[:, :sorted_dims[0]]
     prev_S = compute_cross_view_similarity_matrix(prev_z1, prev_z2)  # (B, B)
-    prev_prob = temperature_softmax(prev_S.flatten(), tau_ml)         # (B²,)
+    prev_prob = temperature_softmax(prev_S.flatten())                 # (B²,)
 
     for i in range(1, len(sorted_dims)):
         dim = sorted_dims[i]
         curr_z1 = z1_full[:, :dim]
         curr_z2 = z2_full[:, :dim]
         curr_S = compute_cross_view_similarity_matrix(curr_z1, curr_z2)  # (B, B)
-        curr_prob = temperature_softmax(curr_S.flatten(), tau_ml)        # (B²,)
+        curr_prob = temperature_softmax(curr_S.flatten())                # (B²,)
 
         # 对称 KL：prev_prob vs curr_prob
         loss_pair = symmetric_kl_divergence(prev_prob, curr_prob)
@@ -177,7 +174,7 @@ def compute_mutual_learning_loss_v4(
 # ============================================================================
 
 class MutualLearningLoss:
-    r"""互学习损失计算器（v4 — 全 B×B 矩阵余弦相似度 + 对称 KL 散度）。
+    r"""互学习损失计算器（v4 — 全 B×B 矩阵余弦相似度 + 对称 KL 散度，ReLU 激活）。
 
     提供面向对象的接口，便于在 GRACE+MRL+ML 等方法中复用。
 
@@ -185,7 +182,6 @@ class MutualLearningLoss:
         ml_calculator = MutualLearningLoss(
             mrl_dims=[64, 128, 256, 512],
             ml_weight=5.0,
-            tau_ml=0.5,
         )
 
         # 直接传入完整投影器输出
@@ -196,20 +192,14 @@ class MutualLearningLoss:
         self,
         mrl_dims: Sequence[int],
         ml_weight: float = 1.0,
-        tau_ml: float = 0.5,
     ):
         """
         参数:
             mrl_dims: MRL 维度列表，例如 [64, 128, 256, 512]
             ml_weight: 互学习损失权重
-            tau_ml: 互学习温度系数，控制 softmax 的尖锐程度
-                - 越小 → 分布越尖锐（只关注最相似/最不相似的节点）
-                - 越大 → 分布越平滑（所有节点等权）
-                - 建议范围: 0.1 ~ 1.0
         """
         self.mrl_dims = sorted({int(d) for d in mrl_dims})
         self.ml_weight = ml_weight
-        self.tau_ml = tau_ml
 
         if len(self.mrl_dims) < 2:
             import warnings
@@ -232,6 +222,5 @@ class MutualLearningLoss:
             z1_full=z1_full,
             z2_full=z2_full,
             mrl_dims=self.mrl_dims,
-            tau_ml=self.tau_ml,
             ml_weight=self.ml_weight,
         )

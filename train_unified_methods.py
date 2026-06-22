@@ -33,6 +33,7 @@ from unified_methods import (
     BaseMethod,
     CCASSGMethod,
     CCASSGWithMRLMethod,
+    CSNEMethod,
     DGIMethod,
     DGIWithMRLMethod,
     GRACEMethod,
@@ -645,11 +646,32 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             mrl_dims=mrl_dims,
             mrl_weight=args.mrl_weight,
             ml_weight=args.ml_weight,
-            tau_ml=args.mrl_tau,
             grace_only_epochs=args.grace_only_epochs,
             grace_ml_epochs=args.grace_ml_epochs,
             ml_module=args.ml_module,
             verbose=True,  # 默认开启 verbose 模式打印损失
+        )
+    if args.method == "csne":
+        return CSNEMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            proj_dim=args.proj_dim,
+            tau=args.tau,
+            p_feat_mask_1=args.p_feat_mask_1,
+            p_edge_drop_1=args.p_edge_drop_1,
+            p_feat_mask_2=args.p_feat_mask_2,
+            p_edge_drop_2=args.p_edge_drop_2,
+            mrl_dims=mrl_dims,
+            mrl_weight=args.mrl_weight,
+            ml_weight=args.ml_weight,
+            ml_module=args.ml_module,
+            hpem_beta_init=args.hpem_beta_init,
+            das_tau_0=args.das_tau_0,
+            warmup_epochs=args.grace_only_epochs,
+            full_epochs=args.grace_ml_epochs,
+            verbose=True,
         )
     raise ValueError(f"未知方法: {args.method}")
 
@@ -882,8 +904,8 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
             if hasattr(method, "epoch"):
                 method.epoch = ep
 
-            # grace_ML 两阶段：进入 ML 阶段时切换学习率
-            if (args.method == "grace_ml"
+            # grace_ML / CSNE 两阶段：进入第二阶段时切换学习率
+            if (args.method in ("grace_ml", "csne")
                     and args.grace_ml_lr is not None
                     and ep == args.grace_only_epochs + 1):
                 for pg in optimizer.param_groups:
@@ -1271,6 +1293,7 @@ def parse_args() -> argparse.Namespace:
             "ccassg_mrl",
             "grace_mrl",
             "grace_ml",
+            "csne",
         ],
     )
     p.add_argument("--dataset", type=str, required=True, choices=["arxiv", "reddit2", "products", "mag"])
@@ -1328,11 +1351,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eval-num-neighbors", type=int, nargs="+", default=[-1, -1])
 
     p.add_argument("--mrl-dims", type=str, default="64,128,256,512", help="MRL 维度列表（逗号分隔）")
-    p.add_argument("--mrl-tau", type=float, default=0.5)
     p.add_argument("--mrl-weight", type=float, default=1.0)
     p.add_argument("--ml-weight", type=float, default=5.0, help="互学习损失权重")
     p.add_argument("--ml-module", type=str, default="ml", choices=["ml", "ml2"],
                    help="互学习模块版本: ml=相邻维度互学习, ml2=所有维度向最高维学习")
+    p.add_argument("--hpem-beta-init", type=float, default=0.1,
+                   help="HPEM 的 β 参数初始值（可学习）")
+    p.add_argument("--das-tau-0", type=float, default=0.5,
+                   help="DAS 基础温度 τ_0")
 
     p.add_argument("--pca-dims", type=str, default=None,
                    help="PCA基线：逗号分隔的目标维度，例如 32,64,128。训练hidden_dim后PCA降维并评估每维度5次")
@@ -1355,14 +1381,14 @@ def main() -> None:
     try:
         args = parse_args()
 
-        # grace_ML 两阶段 epoch 处理：支持显式指定两个阶段的训练轮数
+        # grace_ML / CSNE 两阶段 epoch 处理：支持显式指定两个阶段的训练轮数
         if args.grace_only_epochs is not None or args.grace_ml_epochs is not None:
             goe = args.grace_only_epochs if args.grace_only_epochs is not None else args.pretrain_epochs // 2
             gme = args.grace_ml_epochs if args.grace_ml_epochs is not None else args.pretrain_epochs // 2
             args.grace_only_epochs = goe
             args.grace_ml_epochs = gme
             args.pretrain_epochs = goe + gme
-        else:
+        elif args.method in ("grace_ml", "csne"):
             args.grace_only_epochs = args.pretrain_epochs // 2
             args.grace_ml_epochs = args.pretrain_epochs - args.grace_only_epochs
 
