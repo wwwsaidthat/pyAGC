@@ -104,7 +104,10 @@ def symmetric_kl_divergence(p: Tensor, q: Tensor, eps: float = 1e-12) -> Tensor:
     # KL(q || p): p 作为目标 detach，梯度只流经 q
     kl_qp = (q * (q_clamp.log() - p_clamp.detach().log())).sum()
 
-    loss = 0.5 * (kl_pq + kl_qp)
+    # 除以 B（batch size）做归一化，使 loss 与 batch size 无关
+    # p/q 是 B×B 矩阵拉平得到的 B² 维向量，B = sqrt(numel)
+    B = int(p.numel() ** 0.5)
+    loss = 0.5 * (kl_pq + kl_qp) / B
     return loss
 
 

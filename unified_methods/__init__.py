@@ -10,6 +10,10 @@ from .grace_method import GRACEMethod
 from .grace_mrl_method import GRACEWithMRLMethod
 from .grace_ML import GRACEWithMRLMutualLearningMethod
 from .csne_method import CSNEMethod
+from .ssge_method import SSGEMethod
+from .ssge_mrl_method import SSGEWithMRLMethod
+from .gae_method import GAEMethod, VGAEMethod
+from .gae_mrl_method import GAEWithMRLMethod, VGAEWithMRLMethod
 
 __all__ = [
     "BaseMethod",
@@ -22,4 +26,10 @@ __all__ = [
     "GRACEWithMRLMethod",
     "GRACEWithMRLMutualLearningMethod",
     "CSNEMethod",
+    "SSGEMethod",
+    "SSGEWithMRLMethod",
+    "GAEMethod",
+    "VGAEMethod",
+    "GAEWithMRLMethod",
+    "VGAEWithMRLMethod",
 ]

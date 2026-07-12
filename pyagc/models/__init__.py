@@ -1,6 +1,8 @@
 from .base import BaseModel, TrainableModel, ClusteringModel, LossOutput
 from .dgi import DGI
 from .ccassg import CCASSG
+from .ssge import SSGE
+from .gae import GAE, VGAE
 
 __all__ = [
     'BaseModel',
@@ -9,4 +11,7 @@ __all__ = [
     'LossOutput',
     'DGI',
     'CCASSG',
+    'SSGE',
+    'GAE',
+    'VGAE',
 ]

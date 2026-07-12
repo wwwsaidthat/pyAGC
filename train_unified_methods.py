@@ -39,7 +39,13 @@ from unified_methods import (
     GRACEMethod,
     GRACEWithMRLMethod,
     GRACEWithMRLMutualLearningMethod,
+    SSGEMethod,
+    SSGEWithMRLMethod,
     SupervisedGCNMethod,
+    GAEMethod,
+    VGAEMethod,
+    GAEWithMRLMethod,
+    VGAEWithMRLMethod,
 )
 
 
@@ -673,6 +679,64 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             full_epochs=args.grace_ml_epochs,
             verbose=True,
         )
+    if args.method == "ssge":
+        return SSGEMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            lam=args.lam,
+            p_feat_mask_1=args.p_feat_mask_1,
+            p_edge_drop_1=args.p_edge_drop_1,
+            p_feat_mask_2=args.p_feat_mask_2,
+            p_edge_drop_2=args.p_edge_drop_2,
+        )
+    if args.method == "ssge_mrl":
+        return SSGEWithMRLMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            lam=args.lam,
+            p_feat_mask_1=args.p_feat_mask_1,
+            p_edge_drop_1=args.p_edge_drop_1,
+            p_feat_mask_2=args.p_feat_mask_2,
+            p_edge_drop_2=args.p_edge_drop_2,
+            mrl_dims=mrl_dims,
+            mrl_weight=args.mrl_weight,
+        )
+    if args.method == "gae":
+        return GAEMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+        )
+    if args.method == "vgae":
+        return VGAEMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+        )
+    if args.method == "gae_mrl":
+        return GAEWithMRLMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            mrl_dims=mrl_dims,
+            mrl_weight=args.mrl_weight,
+        )
+    if args.method == "vgae_mrl":
+        return VGAEWithMRLMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            mrl_dims=mrl_dims,
+            mrl_weight=args.mrl_weight,
+        )
     raise ValueError(f"未知方法: {args.method}")
 
 
@@ -1294,6 +1358,12 @@ def parse_args() -> argparse.Namespace:
             "grace_mrl",
             "grace_ml",
             "csne",
+            "ssge",
+            "ssge_mrl",
+            "gae",
+            "vgae",
+            "gae_mrl",
+            "vgae_mrl",
         ],
     )
     p.add_argument("--dataset", type=str, required=True, choices=["arxiv", "reddit2", "products", "mag"])

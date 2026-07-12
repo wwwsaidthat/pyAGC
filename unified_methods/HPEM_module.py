@@ -7,7 +7,7 @@
     τ_i = τ_0 · exp(φ_1 · d_i/d_n + φ_2)                        ← 维度自适应温度
     c_u^{(i-1)} = sim(h_u^{(i-1)}, h_{v^+}^{(i-1)}) - max_{v^-} sim(...)
     w_u^{(i)} = softmax(-β · c_u^{(i-1)} / τ_i)
-    L_HPEM^i = |B| · Σ_u w_u^{(i)} · ℓ_InfoNCE(u; H^{(i)})
+    L_HPEM^i = Σ_u w_u^{(i)} · ℓ_InfoNCE(u; H^{(i)})
 
 可学习参数：
     β:      confusion → weight 缩放系数（softplus 保证 > 0）
@@ -145,7 +145,7 @@ def compute_hpem_loss(
 ) -> Tensor:
     r"""计算单个维度 prefix i 的 HPEM 损失。
 
-    L_HPEM^i = |B| · Σ_u w_u^{(i)} · ℓ_InfoNCE(u; H^{(i)})
+    L_HPEM^i = Σ_u w_u^{(i)} · ℓ_InfoNCE(u; H^{(i)})    （weighted mean 量级）
 
     参数:
         z1_curr, z2_curr: (B, D_i) 当前维度 prefix 嵌入
@@ -156,13 +156,12 @@ def compute_hpem_loss(
     返回:
         hpem_loss: 标量
     """
-    B = z1_curr.size(0)
 
     confusion = compute_confusion_scores(z1_prev, z2_prev)  # (B,)
     weights = confusion_to_weights(confusion, tau, beta)  # (B,)
     per_anchor_loss = compute_per_anchor_infonce(z1_curr, z2_curr, tau)  # (B,)
 
-    hpem_loss = B * (weights * per_anchor_loss).sum()
+    hpem_loss = (weights * per_anchor_loss).sum()
     return hpem_loss
 
 
