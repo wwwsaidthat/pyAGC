@@ -4,10 +4,10 @@ MRL (Multi-Representation Learning) 对每个维度前缀独立计算损失，
 然后对各维度损失取平均，使得不同维度的前缀也能独立地保留图结构信息。
 """
 
-import math
 from typing import Dict, Optional, Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import Data
 from torch_geometric.loader import NeighborLoader
@@ -46,12 +46,18 @@ class GAEWithMRLMethod(GAEMethod):
         return self.hidden_dim
 
     def _gae_mrl_loss(self, z_full: Tensor, pos_edge_index: Tensor) -> Tensor:
-        """对每个维度前缀独立计算 GAE 重建损失。"""
+        """对每个维度前缀独立计算 GAE 重建损失。
+
+        z_full 已由 :meth:`GAE.encode` 做了 L2 归一化；切片后重新归一化
+        以保证每个维度前缀的内积都落在 [-1, 1]。使用模型 gamma 和
+        :func:`F.logsigmoid` 保证数值稳定。
+        """
         losses = []
         n = z_full.size(0)
         num_pos = pos_edge_index.size(1)
+        gamma = self.model.gamma
 
-        # 使用 PyG negative_sampling，保证负边不是正边/自环/反向边
+        # 共享同一组负边采样
         neg_edge_index = negative_sampling(
             edge_index=pos_edge_index,
             num_nodes=n,
@@ -60,17 +66,18 @@ class GAEWithMRLMethod(GAEMethod):
         )
 
         for dim in self.mrl_dims:
-            z = z_full[:, :dim]
+            # 切片后重新 L2 归一化，保证每个前缀内积 ∈ [-1, 1]
+            z = F.normalize(z_full[:, :dim], p=2, dim=-1)
 
-            # 正边损失（内积按 √d 缩放，防止高维 logit 饱和）
+            # 正边损失
             src, dst = pos_edge_index
-            pos_score = torch.sigmoid((z[src] * z[dst]).sum(dim=-1) / math.sqrt(dim))
-            pos_loss = -torch.log(pos_score + EPS).mean()
+            pos_logits = gamma * (z[src] * z[dst]).sum(dim=-1)
+            pos_loss = -F.logsigmoid(pos_logits).mean()
 
             # 负边损失
             n_src, n_dst = neg_edge_index
-            neg_score = torch.sigmoid((z[n_src] * z[n_dst]).sum(dim=-1) / math.sqrt(dim))
-            neg_loss = -torch.log(1 - neg_score + EPS).mean()
+            neg_logits = gamma * (z[n_src] * z[n_dst]).sum(dim=-1)
+            neg_loss = -F.logsigmoid(-neg_logits).mean()
 
             losses.append(pos_loss + neg_loss)
 

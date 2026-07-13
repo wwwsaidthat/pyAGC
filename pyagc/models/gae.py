@@ -5,10 +5,10 @@ Reference:
     https://arxiv.org/abs/1611.07308
 """
 
-import math
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch_geometric.data import Data
 from torch_geometric.nn.inits import reset
@@ -60,10 +60,12 @@ class GAE(TrainableModel):
     through an inner-product decoder:
 
     .. math::
-        \hat{A} = \sigma(Z Z^\top), \quad Z = \text{GCN}(X, A)
+        \hat{A} = \sigma(\gamma \cdot \tilde{Z} \tilde{Z}^\top), \quad
+        \tilde{Z} = \text{L2-Norm}(\text{GCN}(X, A))
 
-    The model is trained by minimizing the binary cross-entropy between
-    the input adjacency and the reconstructed adjacency.
+    Embeddings are L2-normalized so the inner product is bounded in
+    :math:`[-1, 1]` regardless of dimensionality.  A learnable temperature
+    :math:`\gamma` (initialised at 1.0) controls sigmoid sharpness.
 
     Args:
         encoder (torch.nn.Module): The encoder (e.g. GCN) that produces node
@@ -73,76 +75,83 @@ class GAE(TrainableModel):
     def __init__(self, encoder: nn.Module):
         super().__init__()
         self.encoder = encoder
+        self.gamma = nn.Parameter(torch.tensor(1.0))
 
     def reset_parameters(self):
         r"""Resets all learnable parameters."""
         reset(self.encoder)
+        self.gamma.data.fill_(1.0)
 
     def encode(self, *args, **kwargs) -> Tensor:
-        r"""Encodes the graph into node embeddings Z.
+        r"""Encodes the graph into **L2-normalized** node embeddings Z.
 
         Returns:
-            Node embeddings of shape (N, D).
+            Node embeddings of shape (N, D), each row has unit L2 norm.
         """
-        return self.encoder(*args, **filter_kwargs(self.encoder.forward, kwargs))
+        z = self.encoder(*args, **filter_kwargs(self.encoder.forward, kwargs))
+        return F.normalize(z, p=2, dim=-1)
 
-    def decode(self, z: Tensor, edge_index: Tensor) -> Tensor:
-        r"""Computes edge probabilities via scaled inner product + sigmoid.
+    def decode(self, z: Tensor, edge_index: Tensor, sigmoid: bool = True) -> Tensor:
+        r"""Computes (scaled) inner-product logits or sigmoid probabilities.
 
         .. math::
-            s_{ij} = \frac{z_i^\top z_j}{\sqrt{d}}, \quad
+            s_{ij} = \gamma \cdot \tilde{z}_i^\top \tilde{z}_j, \quad
             p(A_{ij}=1) = \sigma(s_{ij})
 
-        Scaling by :math:`1/\sqrt{d}` prevents logit variance from growing
-        with embedding dimension, avoiding sigmoid saturation at high ``d``.
+        Because embeddings are L2-normalised the raw dot product is in
+        :math:`[-1, 1]`; the learnable :obj:`gamma` parameter restores the
+        dynamic range lost by normalisation.
 
         Args:
-            z: Node embeddings of shape (N, D).
+            z: L2-normalised node embeddings of shape (N, D).
             edge_index: Edge indices of shape (2, E).
+            sigmoid: If True, return probabilities; otherwise return raw logits.
 
         Returns:
-            Edge probabilities of shape (E,).
+            Edge probabilities/logits of shape (E,).
         """
         src, dst = edge_index
-        return torch.sigmoid((z[src] * z[dst]).sum(dim=-1) / math.sqrt(z.size(-1)))
+        logits = self.gamma * (z[src] * z[dst]).sum(dim=-1)
+        return torch.sigmoid(logits) if sigmoid else logits
 
     def recon_loss(self, z: Tensor, pos_edge_index: Tensor,
                    neg_edge_index: Optional[Tensor] = None) -> Tensor:
-        r"""Binary cross-entropy reconstruction loss on positive and negative edges.
+        r"""Binary cross-entropy reconstruction loss using numerically-stable
+        :func:`F.logsigmoid`.
 
         .. math::
             \mathcal{L}_{\text{recon}} =
-            -\frac{1}{|E^+|}\sum_{(i,j)\in E^+} \log \sigma(z_i^\top z_j)
-            -\frac{1}{|E^-|}\sum_{(i,j)\in E^-} \log (1 - \sigma(z_i^\top z_j))
+            -\frac{1}{|E^+|}\sum_{(i,j)\in E^+} \log \sigma(s_{ij})
+            -\frac{1}{|E^-|}\sum_{(i,j)\in E^-} \log (1 - \sigma(s_{ij}))
 
         Args:
-            z: Node embeddings of shape (N, D).
-            pos_edge_index: Positive edges (existing edges) of shape (2, E_pos).
-            neg_edge_index: Negative edges (non-edges) of shape (2, E_neg).
+            z: L2-normalised node embeddings of shape (N, D).
+            pos_edge_index: Positive edges of shape (2, E_pos).
+            neg_edge_index: Negative edges of shape (2, E_neg).
                 If None, random negatives are sampled.
 
         Returns:
             Scalar reconstruction loss.
         """
-        pos_score = self.decode(z, pos_edge_index)
-        pos_loss = -torch.log(pos_score + EPS).mean()
+        pos_logits = self.decode(z, pos_edge_index, sigmoid=False)
+        pos_loss = -F.logsigmoid(pos_logits).mean()
 
         if neg_edge_index is None:
             neg_edge_index = _sample_neg_edges(
                 z.size(0), pos_edge_index.size(1), z.device, pos_edge_index,
             )
 
-        neg_score = self.decode(z, neg_edge_index)
-        neg_loss = -torch.log(1 - neg_score + EPS).mean()
+        neg_logits = self.decode(z, neg_edge_index, sigmoid=False)
+        neg_loss = -F.logsigmoid(-neg_logits).mean()
 
         return pos_loss + neg_loss
 
     def embed(self, *args, **kwargs) -> Tensor:
-        r"""Computes node embeddings for downstream evaluation."""
+        r"""Computes L2-normalised node embeddings for downstream evaluation."""
         return self.encode(*args, **kwargs)
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
-        r"""Encodes the graph and returns node embeddings Z."""
+        r"""Encodes the graph and returns L2-normalised node embeddings Z."""
         return self.encode(x, edge_index)
 
     def loss(self, x: Tensor, edge_index: Tensor, **kwargs) -> LossOutput:
@@ -186,4 +195,4 @@ class GAE(TrainableModel):
         )
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(encoder={self.encoder})"
+        return f"{self.__class__.__name__}(encoder={self.encoder}, gamma={self.gamma.item():.3f})"

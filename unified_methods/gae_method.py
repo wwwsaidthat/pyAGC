@@ -1,6 +1,5 @@
 """GAE 方法类。"""
 
-import math
 from typing import List, Optional, Sequence
 
 import torch
@@ -112,32 +111,34 @@ class GAEMethod(BaseMethod):
         """打印诊断信息：embedding 范数、logit 尺度、Sigmoid 饱和度。
 
         在训练结束后调用一次，用于排查高维下的表示坍缩或 logit 爆炸。
+        z 已通过 :meth:`GAE.encode` 做了 L2 归一化，norm 应 ≈1。
         """
         self.eval()
         z = self.infer_embeddings(data, mode, device, eval_num_neighbors, eval_batch_size)
         e = data.edge_index
         n = z.size(0)
         d = z.size(-1)
+        gamma = float(self.model.gamma.item())
 
         # 负边采样（CPU 上完成，避免 GPU OOM）
         neg_e = negative_sampling(edge_index=e, num_nodes=n,
                                   num_neg_samples=e.size(1), method="sparse")
 
-        # 正边 logits（已缩放）
+        # 正边 logits = gamma * dot (z 已归一化，dot ∈ [-1, 1])
         src_p, dst_p = e
-        pos_logits = (z[src_p] * z[dst_p]).sum(dim=-1) / math.sqrt(d)
+        pos_logits = gamma * (z[src_p] * z[dst_p]).sum(dim=-1)
 
-        # 负边 logits（已缩放）
+        # 负边 logits
         src_n, dst_n = neg_e
-        neg_logits = (z[src_n] * z[dst_n]).sum(dim=-1) / math.sqrt(d)
+        neg_logits = gamma * (z[src_n] * z[dst_n]).sum(dim=-1)
 
         z_norms = z.norm(dim=-1)
 
         logger.info(
-            "DIAG | dim=%d | z mean=%.4f std=%.4f norm_mean=%.2f norm_max=%.2f | "
+            "DIAG | dim=%d gamma=%.3f | z mean=%.4f std=%.4f norm_mean=%.4f norm_max=%.4f | "
             "pos_logit mean=%.2f std=%.2f | neg_logit mean=%.2f std=%.2f | "
             "pos_sat=%.4f neg_sat=%.4f",
-            d,
+            d, gamma,
             z.mean().item(), z.std().item(),
             z_norms.mean().item(), z_norms.max().item(),
             pos_logits.mean().item(), pos_logits.std().item(),
