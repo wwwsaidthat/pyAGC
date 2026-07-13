@@ -43,9 +43,7 @@ from unified_methods import (
     SSGEWithMRLMethod,
     SupervisedGCNMethod,
     GAEMethod,
-    VGAEMethod,
     GAEWithMRLMethod,
-    VGAEWithMRLMethod,
 )
 
 
@@ -712,24 +710,8 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             num_layers=args.num_layers,
             dropout=args.dropout,
         )
-    if args.method == "vgae":
-        return VGAEMethod(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-        )
     if args.method == "gae_mrl":
         return GAEWithMRLMethod(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            mrl_dims=mrl_dims,
-            mrl_weight=args.mrl_weight,
-        )
-    if args.method == "vgae_mrl":
-        return VGAEWithMRLMethod(
             in_dim=in_dim,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
@@ -1023,6 +1005,19 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
                         break
             else:
                 logger.info("Pretrain Epoch %03d | loss=%.4f%s", ep, loss, extra_info)
+        # 训练结束后打印诊断信息（embedding 范数、logit 尺度、饱和度）
+        if hasattr(method, "diagnose"):
+            try:
+                method.diagnose(
+                    data=data,
+                    mode=mode,
+                    device=device,
+                    eval_num_neighbors=args.eval_num_neighbors,
+                    eval_batch_size=args.eval_batch_size,
+                    logger=logger,
+                )
+            except Exception as exc:
+                logger.warning("DIAG 失败: %s", exc)
         ckpt_path = save_model_checkpoint(
             run_dir=run_dir,
             args=args,
@@ -1361,9 +1356,7 @@ def parse_args() -> argparse.Namespace:
             "ssge",
             "ssge_mrl",
             "gae",
-            "vgae",
             "gae_mrl",
-            "vgae_mrl",
         ],
     )
     p.add_argument("--dataset", type=str, required=True, choices=["arxiv", "reddit2", "products", "mag"])
