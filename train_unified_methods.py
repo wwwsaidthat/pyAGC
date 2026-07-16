@@ -709,6 +709,8 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             dropout=args.dropout,
+            neg_ratio=args.neg_ratio,
+            use_amp=args.amp,
         )
     if args.method == "gae_mrl":
         return GAEWithMRLMethod(
@@ -718,6 +720,8 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             dropout=args.dropout,
             mrl_dims=mrl_dims,
             mrl_weight=args.mrl_weight,
+            neg_ratio=args.neg_ratio,
+            use_amp=args.amp,
         )
     raise ValueError(f"未知方法: {args.method}")
 
@@ -1374,6 +1378,10 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--p-feat-mask-1", type=float, default=0.3)
     p.add_argument("--p-edge-drop-1", type=float, default=0.2)
+    p.add_argument("--neg-ratio", type=float, default=1.0,
+                   help="GAE 负边采样比例（相对正边数）。大图建议 0.25–0.5，默认 1.0")
+    p.add_argument("--amp", action="store_true", default=False,
+                   help="启用自动混合精度（AMP），可节省约 40%% GPU 显存")
     p.add_argument("--p-feat-mask-2", type=float, default=0.4)
     p.add_argument("--p-edge-drop-2", type=float, default=0.4)
 

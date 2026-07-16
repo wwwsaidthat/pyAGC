@@ -4,14 +4,13 @@ MRL (Multi-Representation Learning) 对每个维度前缀独立计算损失，
 然后对各维度损失取平均，使得不同维度的前缀也能独立地保留图结构信息。
 """
 
+import math
 from typing import Dict, Optional, Sequence
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import Data
 from torch_geometric.loader import NeighborLoader
-
 from torch_geometric.utils import negative_sampling
 
 from pyagc.models.gae import EPS
@@ -48,36 +47,31 @@ class GAEWithMRLMethod(GAEMethod):
     def _gae_mrl_loss(self, z_full: Tensor, pos_edge_index: Tensor) -> Tensor:
         """对每个维度前缀独立计算 GAE 重建损失。
 
-        z_full 已由 :meth:`GAE.encode` 做了 L2 归一化；切片后重新归一化
-        以保证每个维度前缀的内积都落在 [-1, 1]。使用模型 gamma 和
-        :func:`F.logsigmoid` 保证数值稳定。
+        使用模型 ``neg_ratio`` 控制负边采样数量以节省内存。
         """
         losses = []
         n = z_full.size(0)
         num_pos = pos_edge_index.size(1)
-        gamma = self.model.gamma
 
-        # 共享同一组负边采样
         neg_edge_index = negative_sampling(
             edge_index=pos_edge_index,
             num_nodes=n,
-            num_neg_samples=num_pos,
+            num_neg_samples=max(1, int(num_pos * self.model.neg_ratio)),
             method="sparse",
         )
 
         for dim in self.mrl_dims:
-            # 切片后重新 L2 归一化，保证每个前缀内积 ∈ [-1, 1]
-            z = F.normalize(z_full[:, :dim], p=2, dim=-1)
+            z = z_full[:, :dim]
 
-            # 正边损失
+            # 正边损失（内积按 √d 缩放）
             src, dst = pos_edge_index
-            pos_logits = gamma * (z[src] * z[dst]).sum(dim=-1)
-            pos_loss = -F.logsigmoid(pos_logits).mean()
+            pos_score = torch.sigmoid((z[src] * z[dst]).sum(dim=-1) / math.sqrt(dim))
+            pos_loss = -torch.log(pos_score + EPS).mean()
 
             # 负边损失
             n_src, n_dst = neg_edge_index
-            neg_logits = gamma * (z[n_src] * z[n_dst]).sum(dim=-1)
-            neg_loss = -F.logsigmoid(-neg_logits).mean()
+            neg_score = torch.sigmoid((z[n_src] * z[n_dst]).sum(dim=-1) / math.sqrt(dim))
+            neg_loss = -torch.log(1 - neg_score + EPS).mean()
 
             losses.append(pos_loss + neg_loss)
 
@@ -88,8 +82,9 @@ class GAEWithMRLMethod(GAEMethod):
         optimizer.zero_grad()
         x = data.x.to(device)
         e = data.edge_index.to(device)
-        z = self.model(x, e)
-        loss = self._gae_mrl_loss(z, e)
+        with torch.cuda.amp.autocast(enabled=self.use_amp and device.type == "cuda"):
+            z = self.model(x, e)
+            loss = self._gae_mrl_loss(z, e)
         loss.backward()
         optimizer.step()
         return float(loss.item())
@@ -116,12 +111,16 @@ class GAEWithMRLMethod(GAEMethod):
         for batch in loader:
             batch = batch.to(device)
             optimizer.zero_grad()
-            z = self.model(batch.x, batch.edge_index)
-            loss = self._gae_mrl_loss(z, batch.edge_index)
+            with torch.cuda.amp.autocast(enabled=self.use_amp and device.type == "cuda"):
+                z = self.model(batch.x, batch.edge_index)
+                loss = self._gae_mrl_loss(z, batch.edge_index)
             loss.backward()
             optimizer.step()
             total += float(loss.item()) * int(batch.batch_size)
             count += int(batch.batch_size)
+            del batch
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         return total / max(count, 1)
 
     @torch.no_grad()
