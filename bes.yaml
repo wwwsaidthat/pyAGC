@@ -1,0 +1,83 @@
+# BES: Bootstrapped Embedding Selection
+# ICML 2026.
+#
+# 支持维度: 32, 64, 128, 256, 384, 512, 768
+# 支持数据集: ogbn-arxiv, ogbn-products, ogbn-mag
+#
+# 运行示例:
+#   python train_unified_methods.py --config bes.yaml --dataset arxiv --hidden-dim 64
+#   python train_unified_methods.py --config bes.yaml --dataset products --hidden-dim 128
+
+default:
+  # --- 训练参数 ---
+  method: bes
+  pretrain_lr: 0.0001            # 低学习率（与原 BES lr=1e-4 一致）
+  pretrain_weight_decay: 0.0005  # 与原 BES 一致
+  pretrain_epochs: 200
+  pretrain_patience: 20
+  pretrain_min_delta: 1e-4
+  pretrain_eval_every: 1
+  pretrain_input: train          # BES 只用训练节点做边界检测
+  pretrain_early_stop: true
+
+  # --- 模型参数 ---
+  hidden_dim: 64                 # 可覆盖为 32/64/128/256/384/512/768
+  num_layers: 2
+  dropout: 0.5
+
+  # --- BES 特有参数 ---
+  bes_tau: 1.0                   # 排斥损失温度
+  bes_delta: 5.0                 # Mahalanobis 边界检测阈值
+  bes_alpha: 1.0                 # Virtual step 缩放因子
+
+  # --- 评估参数 ---
+  mode: auto
+  cls_epochs: 200
+  cls_lr: 0.01
+  cls_weight_decay: 0.0
+  cls_batch_size: 8192
+  cls_early_stop: true
+  cls_patience: 20
+  cls_min_delta: 1e-4
+  batch_size: 1024
+  eval_batch_size: 4096
+  num_neighbors: [15, 10]
+  eval_num_neighbors: [-1, -1]
+  eval_seeds: [0, 1, 2, 3, 4]
+
+  # --- 资源 ---
+  gpu_id: auto
+  infer_device: auto
+  log_level: INFO
+
+
+# ============================================================================
+# ogbn-arxiv (169K nodes — 全图可载入 GPU, 约 6GB)
+# ============================================================================
+arxiv:
+  pretrain_epochs: 200
+  mode: neighbor
+
+
+# ============================================================================
+# ogbn-products (2.4M nodes — 需要 Neighbor 采样)
+# ============================================================================
+products:
+  pretrain_epochs: 200
+  mode: neighbor
+  batch_size: 4096
+  eval_batch_size: 2048
+  num_neighbors: [10, 5]
+  eval_num_neighbors: [-1, -1]
+
+
+# ============================================================================
+# ogbn-mag (heterogeneous — paper 子图, 需要 Neighbor 采样)
+# ============================================================================
+mag:
+  pretrain_epochs: 200
+  mode: neighbor
+  batch_size: 4096
+  eval_batch_size: 2048
+  num_neighbors: [10, 5]
+  eval_num_neighbors: [-1, -1]

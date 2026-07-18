@@ -1,0 +1,4 @@
+2026-07-19 07:43:23 | INFO | CheckpointDir=/Users/wwwsaidthat/Desktop/pyAGC/checkpoints/lrgae/arxiv/20260719_074323_44a21bd80a_hd32_l2
+2026-07-19 07:43:23 | INFO | ResultDir=/Users/wwwsaidthat/Desktop/pyAGC/results/arxiv/lrgae/20260719_074323_44a21bd80a_hd32_l2
+2026-07-19 07:43:23 | INFO | 方法=lrgae | 数据集=arxiv | train_seed=0 | eval_seeds=[0, 1, 2, 3, 4]
+2026-07-19 07:43:23 | INFO | 训练开始 | 方法=lrgae | 数据集=arxiv | 表示维度=32 | 设备=cpu | mode=neighbor | train_seed=0

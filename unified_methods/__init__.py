@@ -14,6 +14,8 @@ from .ssge_method import SSGEMethod
 from .ssge_mrl_method import SSGEWithMRLMethod
 from .gae_method import GAEMethod
 from .gae_mrl_method import GAEWithMRLMethod
+from .lrgae_method import LRGAEMethod
+from .bes_method import BESMethod
 
 __all__ = [
     "BaseMethod",
@@ -30,4 +32,6 @@ __all__ = [
     "SSGEWithMRLMethod",
     "GAEMethod",
     "GAEWithMRLMethod",
+    "LRGAEMethod",
+    "BESMethod",
 ]

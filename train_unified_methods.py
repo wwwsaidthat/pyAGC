@@ -44,6 +44,8 @@ from unified_methods import (
     SupervisedGCNMethod,
     GAEMethod,
     GAEWithMRLMethod,
+    LRGAEMethod,
+    BESMethod,
 )
 
 
@@ -723,6 +725,27 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             neg_ratio=args.neg_ratio,
             use_amp=args.amp,
         )
+    if args.method == "lrgae":
+        return LRGAEMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            neg_ratio=args.neg_ratio,
+            lrgae_rank=getattr(args, "lrgae_rank", None),
+            use_amp=args.amp,
+        )
+    if args.method == "bes":
+        return BESMethod(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            tau=getattr(args, "bes_tau", 1.0),
+            delta=getattr(args, "bes_delta", 5.0),
+            alpha=getattr(args, "bes_alpha", 1.0),
+            num_classes=num_classes,
+        )
     raise ValueError(f"未知方法: {args.method}")
 
 
@@ -940,11 +963,15 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
             "supervised_stop_epoch": int(stop_epoch) if args.supervised_early_stop else None,
         }
     else:
-        optimizer = torch.optim.Adam(
-            method.parameters(),
-            lr=args.pretrain_lr,
-            weight_decay=args.pretrain_weight_decay,
-        )
+        # Check if method manages its own optimizer(s) (e.g., SGRL dual-optimizer)
+        if hasattr(method, 'manages_own_optimizer') and method.manages_own_optimizer:
+            optimizer = None  # Will be ignored; method handles optimization internally
+        else:
+            optimizer = torch.optim.Adam(
+                method.parameters(),
+                lr=args.pretrain_lr,
+                weight_decay=args.pretrain_weight_decay,
+            )
         best_ssl = float("inf")
         best_ssl_epoch = 0
         ssl_stop_epoch = 0
@@ -1361,6 +1388,8 @@ def parse_args() -> argparse.Namespace:
             "ssge_mrl",
             "gae",
             "gae_mrl",
+            "lrgae",
+            "bes",
         ],
     )
     p.add_argument("--dataset", type=str, required=True, choices=["arxiv", "reddit2", "products", "mag"])
@@ -1436,6 +1465,18 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--svd-dims", type=str, default=None,
                    help="SVD基线：逗号分隔的目标维度，例如 32,64,128。使用TruncatedSVD（不去中心化）降维并评估每维度5次")
+
+    # ---- BES 特有参数 ----
+    p.add_argument("--bes-tau", type=float, default=1.0,
+                   help="BES 排斥损失温度系数")
+    p.add_argument("--bes-delta", type=float, default=5.0,
+                   help="BES Mahalanobis 边界检测阈值")
+    p.add_argument("--bes-alpha", type=float, default=1.0,
+                   help="BES virtual step 缩放因子")
+
+    # ---- LRGAE 特有参数 ----
+    p.add_argument("--lrgae-rank", type=int, default=None,
+                   help="LRGAE SVD 截断秩，默认等于 hidden_dim")
 
     p.add_argument("--eval-only", action="store_true",
                    help="仅评估模式：跳过训练，直接从 --checkpoint 加载模型进行PCA/标准评估")
