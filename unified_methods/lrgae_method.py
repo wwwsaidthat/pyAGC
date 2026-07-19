@@ -1,17 +1,15 @@
 """LRGAE 方法类。
 
-LRGAE (Low-Rank Graph Auto-Encoder) 在标准 GAE 的基础上，
-将重建目标从二值邻接矩阵替换为低秩去噪版本：
+LRGAE (Low-Rank Graph Auto-Encoder) 通过重建归一化邻接矩阵的
+PSD 低秩谱近似来学习节点嵌入。
 
-1. 对归一化邻接矩阵 Â = D^{-1/2} A D^{-1/2} 做截断 SVD
-2. 得到目标嵌入 T = U Σ^{1/2}（形状 N×rank）
-3. 训练 GCN 编码器使 z_i·z_j 匹配低秩目标 t_i·t_j
-4. Loss = MSE(z_i·z_j/√d, t_i·t_j) + MSE(z_i·z_j/√d, 0)（负边）
-
-低秩近似天然滤除高频噪声边，提供更干净的训练信号。
+1. Â = D^{-1/2} A D^{-1/2}
+2. eigsh(which='LA') → (λ_+, Q_+)  正特征值
+3. T = Q_+ √Λ_+    PSD 目标嵌入（纯 CPU 属性，不随模型迁移 GPU）
+4. MSE(z_i·z_j/√d,  t_i·t_j)  对正负边都有软目标
 """
 
-from typing import List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import torch
 from torch import Tensor
@@ -25,16 +23,17 @@ from .base_method import BaseMethod
 
 
 class LRGAEMethod(BaseMethod):
-    """LRGAE 自监督方法。
+    """LRGAE — PSD 低秩图重建。
 
     Args:
         in_dim: 输入特征维度。
         hidden_dim: 隐藏/输出维度。
         num_layers: GCN 层数。
         dropout: Dropout 比率。
-        neg_ratio: 负边采样比例（相对正边数），默认 1.0。大图建议 0.25--0.5。
-        lrgae_rank: SVD 截断秩，默认等于 hidden_dim。
-        use_amp: 是否启用自动混合精度（AMP），可节省约 40% 显存。
+        neg_ratio: 负边采样比例，默认 1.0。
+        lrgae_rank: 特征值保留数，默认 = hidden_dim。
+        add_self_loops: 归一化邻接是否加自环。
+        use_amp: 启用 AMP。
     """
 
     def __init__(
@@ -45,6 +44,7 @@ class LRGAEMethod(BaseMethod):
         dropout: float,
         neg_ratio: float = 1.0,
         lrgae_rank: Optional[int] = None,
+        add_self_loops: bool = False,
         use_amp: bool = False,
     ) -> None:
         super().__init__(method_name="lrgae", is_supervised=False)
@@ -52,13 +52,9 @@ class LRGAEMethod(BaseMethod):
         self.hidden_dim = hidden_dim
         self.neg_ratio = float(neg_ratio)
         self.lrgae_rank = lrgae_rank if lrgae_rank is not None else hidden_dim
+        self.add_self_loops = bool(add_self_loops)
         self.use_amp = bool(use_amp)
 
-        # Build encoder and immediately wrap in LRGAE with a placeholder target.
-        # The real low-rank target (needs edge_index for SVD) is computed lazily
-        # on the first training/inference step and swapped in.
-        # IMPORTANT: encoder ONLY lives inside self.model — no separate
-        # self.encoder attribute, so state_dict keys are consistent.
         encoder = GCN(
             in_channels=in_dim,
             hidden_channels=hidden_dim,
@@ -67,42 +63,82 @@ class LRGAEMethod(BaseMethod):
             dropout=dropout,
             norm="batch_norm",
         )
-        rank = self.lrgae_rank
-        placeholder = torch.zeros(1, rank)  # dummy target, replaced in _ensure_prepared
         self.model = LRGAE(
             encoder=encoder,
-            target_embeddings=placeholder,
+            target_embeddings=None,  # lazy — computed or loaded later
             neg_ratio=self.neg_ratio,
         )
         self._targets_prepared = False
 
+    # ------------------------------------------------------------------
+    # 基础接口
+    # ------------------------------------------------------------------
+
     def output_dim(self) -> int:
         return self.hidden_dim
 
-    def _ensure_prepared(self, data: Data) -> None:
-        """Compute low-rank SVD targets and swap them into self.model (once).
+    # ------------------------------------------------------------------
+    # 加载 / 保存
+    # ------------------------------------------------------------------
 
-        Guarded by both the _targets_prepared flag AND a shape check:
-        if target_embeddings already has N rows (loaded from checkpoint),
-        skip recomputation.
+    def state_dict(self, *args, **kwargs):
+        """Override to include the CPU target attribute in the checkpoint."""
+        sd = super().state_dict(*args, **kwargs)
+        if self.model.has_targets:
+            sd["target_embeddings_cpu"] = self.model.target_embeddings_cpu
+        return sd
+
+    def load_state_dict(
+        self,
+        state_dict: Mapping[str, Any],
+        strict: bool = True,
+    ) -> None:
+        """Remap legacy keys and restore the CPU target attribute.
+
+        * ``_model.*`` / ``encoder.*`` → ``model.*`` (old code).
+        * ``target_embeddings_cpu`` is extracted before the standard
+          loader runs and restored via :meth:`LRGAE.set_targets`.
         """
-        if self._targets_prepared:
-            return
-        # Checkpoint already contains real targets (shape N×rank, not 1×rank placeholder)
-        if self.model.target_embeddings.size(0) > 1:
+        # ---- remap legacy keys ----
+        _remap: Dict[str, Tensor] = {}
+        for k, v in state_dict.items():
+            if k == "target_embeddings_cpu":
+                continue  # handled separately below
+            if k.startswith("_model."):
+                _remap[k[len("_model."):]] = v
+            elif k.startswith("encoder."):
+                _remap["model." + k] = v
+            else:
+                _remap[k] = v
+
+        # ---- restore CPU target ----
+        t_key = "target_embeddings_cpu"
+        if t_key in state_dict:
+            self.model.set_targets(state_dict[t_key])
+            self._targets_prepared = True
+
+        return super().load_state_dict(_remap, strict=strict)
+
+    # ------------------------------------------------------------------
+    # PSD 目标预计算（lazy）
+    # ------------------------------------------------------------------
+
+    def _ensure_prepared(self, data: Data) -> None:
+        """Compute PSD spectral targets (once)."""
+        if self._targets_prepared or self.model.has_targets:
             self._targets_prepared = True
             return
 
-        rank = min(self.lrgae_rank, self.hidden_dim, data.num_nodes - 2)
+        rank = min(self.lrgae_rank, self.hidden_dim, data.num_nodes - 1)
         edge_index_cpu = data.edge_index.cpu()
 
         targets = compute_low_rank_targets(
             edge_index=edge_index_cpu,
             num_nodes=data.num_nodes,
             rank=rank,
+            add_self_loops=self.add_self_loops,
         )
-        # Replace the placeholder buffer with real targets
-        self.model.register_buffer("target_embeddings", targets)
+        self.model.set_targets(targets)
         self._targets_prepared = True
 
     # ------------------------------------------------------------------
@@ -119,7 +155,7 @@ class LRGAEMethod(BaseMethod):
         edge_index = data.edge_index.to(device)
 
         optimizer.zero_grad()
-        with torch.cuda.amp.autocast(enabled=self.use_amp and device.type == "cuda"):
+        with torch.amp.autocast("cuda", enabled=self.use_amp and device.type == "cuda"):
             z = self.model.forward(x, edge_index)
             loss_tensor = self.model.recon_loss(z, edge_index)
         loss_tensor.backward()
@@ -155,18 +191,25 @@ class LRGAEMethod(BaseMethod):
         count = 0
         for batch in loader:
             batch = batch.to(device)
+            n_seed = int(batch.batch_size)
+
+            # Supervise edges whose source is a seed node.
+            ei = batch.edge_index
+            seed_mask = ei[0] < n_seed
+            pos_edges = ei[:, seed_mask]
+
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast(enabled=self.use_amp and device.type == "cuda"):
-                z = self.model.forward(batch.x, batch.edge_index)
+            with torch.amp.autocast("cuda", enabled=self.use_amp and device.type == "cuda"):
+                z = self.model.forward(batch.x, ei)
                 node_map = getattr(batch, "n_id", None)
                 loss_tensor = self.model.recon_loss(
-                    z, batch.edge_index,
+                    z, pos_edges,
                     node_map=node_map,
+                    negative_exclusion_edge_index=ei,
                 )
             loss_tensor.backward()
             optimizer.step()
 
-            n_seed = int(batch.batch_size)
             total += float(loss_tensor.item()) * n_seed
             count += n_seed
             del batch

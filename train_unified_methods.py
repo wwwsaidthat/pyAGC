@@ -8,6 +8,7 @@ import json
 import logging
 import random
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -733,6 +734,7 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             dropout=args.dropout,
             neg_ratio=args.neg_ratio,
             lrgae_rank=getattr(args, "lrgae_rank", None),
+            add_self_loops=getattr(args, "lrgae_add_self_loops", False),
             use_amp=args.amp,
         )
     if args.method == "bes":
@@ -1477,6 +1479,8 @@ def parse_args() -> argparse.Namespace:
     # ---- LRGAE 特有参数 ----
     p.add_argument("--lrgae-rank", type=int, default=None,
                    help="LRGAE SVD 截断秩，默认等于 hidden_dim")
+    p.add_argument("--lrgae-add-self-loops", action="store_true", default=False,
+                   help="归一化邻接矩阵是否加自环（GCN-style Â）")
 
     p.add_argument("--eval-only", action="store_true",
                    help="仅评估模式：跳过训练，直接从 --checkpoint 加载模型进行PCA/标准评估")
@@ -1492,6 +1496,7 @@ def main() -> None:
     """程序入口。"""
     try:
         args = parse_args()
+        t_start = time.time()
 
         # grace_ML / CSNE 两阶段 epoch 处理：支持显式指定两个阶段的训练轮数
         if args.grace_only_epochs is not None or args.grace_ml_epochs is not None:
@@ -1808,6 +1813,21 @@ def main() -> None:
                         eval_results.append(svd_result)
 
         save_results(run_dir=result_dir, args=args, train_meta=train_meta, eval_results=eval_results, logger=logger)
+
+        # ---- 记录总耗时 ----
+        t_end = time.time()
+        elapsed = int(t_end - t_start)
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+        time_dir = project_root() / "time"
+        time_dir.mkdir(parents=True, exist_ok=True)
+        time_file = time_dir / "timecost.txt"
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tag = f"{args.method}_{args.dataset}_hd{int(args.hidden_dim)}"
+        line = f"[{ts}] {tag} | {h}h {m}m {s}s\n"
+        with open(time_file, "a", encoding="utf-8") as f:
+            f.write(line)
+        logger.info("总耗时: %dh %dm %ds → %s", h, m, s, str(time_file))
     except KeyboardInterrupt:
         print("\n检测到用户中断，程序已退出。", file=sys.stderr)
         sys.exit(130)
