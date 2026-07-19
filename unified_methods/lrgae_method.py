@@ -19,7 +19,7 @@ from torch_geometric.data import Data
 from torch_geometric.loader import NeighborLoader
 
 from pyagc.encoders import GCN
-from pyagc.models.lrgae import LRGAE, compute_low_rank_targets, _sample_neg_edges
+from pyagc.models.lrgae import LRGAE, compute_low_rank_targets
 
 from .base_method import BaseMethod
 
@@ -49,7 +49,17 @@ class LRGAEMethod(BaseMethod):
     ) -> None:
         super().__init__(method_name="lrgae", is_supervised=False)
 
-        self.encoder = GCN(
+        self.hidden_dim = hidden_dim
+        self.neg_ratio = float(neg_ratio)
+        self.lrgae_rank = lrgae_rank if lrgae_rank is not None else hidden_dim
+        self.use_amp = bool(use_amp)
+
+        # Build encoder and immediately wrap in LRGAE with a placeholder target.
+        # The real low-rank target (needs edge_index for SVD) is computed lazily
+        # on the first training/inference step and swapped in.
+        # IMPORTANT: encoder ONLY lives inside self.model — no separate
+        # self.encoder attribute, so state_dict keys are consistent.
+        encoder = GCN(
             in_channels=in_dim,
             hidden_channels=hidden_dim,
             out_channels=hidden_dim,
@@ -57,21 +67,30 @@ class LRGAEMethod(BaseMethod):
             dropout=dropout,
             norm="batch_norm",
         )
-        self.hidden_dim = hidden_dim
-        self.neg_ratio = float(neg_ratio)
-        self.lrgae_rank = lrgae_rank if lrgae_rank is not None else hidden_dim
-        self.use_amp = bool(use_amp)
-
-        # Lazily initialised on first training step (needs edge_index for SVD)
-        self._model: Optional[LRGAE] = None
+        rank = self.lrgae_rank
+        placeholder = torch.zeros(1, rank)  # dummy target, replaced in _ensure_prepared
+        self.model = LRGAE(
+            encoder=encoder,
+            target_embeddings=placeholder,
+            neg_ratio=self.neg_ratio,
+        )
         self._targets_prepared = False
 
     def output_dim(self) -> int:
         return self.hidden_dim
 
     def _ensure_prepared(self, data: Data) -> None:
-        """Compute low-rank targets and build the LRGAE model (once)."""
+        """Compute low-rank SVD targets and swap them into self.model (once).
+
+        Guarded by both the _targets_prepared flag AND a shape check:
+        if target_embeddings already has N rows (loaded from checkpoint),
+        skip recomputation.
+        """
         if self._targets_prepared:
+            return
+        # Checkpoint already contains real targets (shape N×rank, not 1×rank placeholder)
+        if self.model.target_embeddings.size(0) > 1:
+            self._targets_prepared = True
             return
 
         rank = min(self.lrgae_rank, self.hidden_dim, data.num_nodes - 2)
@@ -82,11 +101,8 @@ class LRGAEMethod(BaseMethod):
             num_nodes=data.num_nodes,
             rank=rank,
         )
-        self._model = LRGAE(
-            encoder=self.encoder,
-            target_embeddings=targets,
-            neg_ratio=self.neg_ratio,
-        )
+        # Replace the placeholder buffer with real targets
+        self.model.register_buffer("target_embeddings", targets)
         self._targets_prepared = True
 
     # ------------------------------------------------------------------
@@ -104,8 +120,8 @@ class LRGAEMethod(BaseMethod):
 
         optimizer.zero_grad()
         with torch.cuda.amp.autocast(enabled=self.use_amp and device.type == "cuda"):
-            z = self._model.forward(x, edge_index)
-            loss_tensor = self._model.recon_loss(z, edge_index)
+            z = self.model.forward(x, edge_index)
+            loss_tensor = self.model.recon_loss(z, edge_index)
         loss_tensor.backward()
         optimizer.step()
 
@@ -141,9 +157,9 @@ class LRGAEMethod(BaseMethod):
             batch = batch.to(device)
             optimizer.zero_grad()
             with torch.cuda.amp.autocast(enabled=self.use_amp and device.type == "cuda"):
-                z = self._model.forward(batch.x, batch.edge_index)
+                z = self.model.forward(batch.x, batch.edge_index)
                 node_map = getattr(batch, "n_id", None)
-                loss_tensor = self._model.recon_loss(
+                loss_tensor = self.model.recon_loss(
                     z, batch.edge_index,
                     node_map=node_map,
                 )
@@ -176,7 +192,7 @@ class LRGAEMethod(BaseMethod):
         self.eval()
 
         if mode == "full":
-            return self._model.forward(
+            return self.model.forward(
                 data.x.to(device), data.edge_index.to(device)
             ).cpu()
 
@@ -190,6 +206,6 @@ class LRGAEMethod(BaseMethod):
         out: List[Tensor] = []
         for batch in loader:
             batch = batch.to(device)
-            h = self._model.forward(batch.x, batch.edge_index)[: batch.batch_size]
+            h = self.model.forward(batch.x, batch.edge_index)[: batch.batch_size]
             out.append(h.cpu())
         return torch.cat(out, dim=0)

@@ -63,7 +63,7 @@ arxiv:
 # ogbn-products (2.4M nodes — 需要 Neighbor 采样)
 # ============================================================================
 products:
-  pretrain_epochs: 200
+  pretrain_epochs: 20
   mode: neighbor
   batch_size: 4096
   eval_batch_size: 2048
@@ -75,7 +75,7 @@ products:
 # ogbn-mag (heterogeneous — paper 子图, 需要 Neighbor 采样)
 # ============================================================================
 mag:
-  pretrain_epochs: 200
+  pretrain_epochs: 50
   mode: neighbor
   batch_size: 4096
   eval_batch_size: 2048
