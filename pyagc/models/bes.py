@@ -1,254 +1,213 @@
-"""BES: Bootstrapped Embedding Selection for Graph Self-Supervised Learning.
+"""Paper-faithful components for Boundary Embedding Shaping (BES).
 
-Reference:
-  "Bootstrapped Embedding Selection for Graph Representation Learning", ICML 2026.
-
-Key components:
-  - BESEncoder: Learnable GCN encoder (replaces original frozen dual-encoder + attention)
-  - detect_boundary_nodes(): Mahalanobis-based boundary node detection
-  - compute_repulsion_loss(): InfoNCE-style gravitational repulsion for boundary nodes
+Reference: Chen et al., "Boundary Embedding Shaping with Adaptive Contrastive
+Learning for Graph Structural Disentanglement", ICML 2026.
 """
 
-from typing import Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.neighbors import NearestNeighbors
 from torch import Tensor
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, SAGEConv
 
 
-# ============================================================================
-# 1. BES Encoder
-# ============================================================================
+class BESGraphEncoder(nn.Module):
+    """One pretrained graph view used by the BES plug-in."""
 
-
-class BESEncoder(nn.Module):
-    """Learnable GCN encoder for BES.
-
-    Architecture:
-        num_layers × (GCNConv → BatchNorm1d → ReLU → Dropout)
-
-    This replaces the original dual frozen encoder + MultiHeadSelfAttention stack.
-    The core BES contribution (boundary detection + repulsion) is orthogonal to
-    the encoder choice; a standard GCN is dataset-agnostic and sufficient.
-
-    Args:
-        in_dim: Input feature dimension.
-        hidden_dim: Hidden/output embedding dimension.
-        num_layers: Number of GCNConv layers (default 2).
-        dropout: Dropout probability (default 0.5).
-    """
-
-    def __init__(
-        self,
-        in_dim: int,
-        hidden_dim: int,
-        num_layers: int = 2,
-        dropout: float = 0.5,
-    ) -> None:
+    def __init__(self, in_dim: int, hidden_dim: int, num_layers: int, dropout: float, kind: str) -> None:
         super().__init__()
-        self.in_dim = in_dim
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
-        self.dropout_rate = dropout
-
+        if num_layers < 1:
+            raise ValueError("num_layers 必须 >= 1")
+        conv_cls = GCNConv if kind == "gcn" else SAGEConv
         self.convs = nn.ModuleList()
-        self.bns = nn.ModuleList()
-        self.drop = nn.Dropout(dropout)
-
-        for i in range(num_layers):
-            in_c = in_dim if i == 0 else hidden_dim
-            self.convs.append(GCNConv(in_c, hidden_dim))
-            self.bns.append(nn.BatchNorm1d(hidden_dim))
+        self.norms = nn.ModuleList()
+        for layer in range(num_layers):
+            in_channels = in_dim if layer == 0 else hidden_dim
+            self.convs.append(conv_cls(in_channels, hidden_dim))
+            self.norms.append(nn.BatchNorm1d(hidden_dim))
+        self.dropout = float(dropout)
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
-        """Forward pass returning [N, hidden_dim] embeddings."""
-        for i in range(self.num_layers):
-            x = self.convs[i](x, edge_index)
-            x = self.bns[i](x)
-            x = F.relu(x)
-            x = self.drop(x)
+        for conv, norm in zip(self.convs, self.norms):
+            x = conv(x, edge_index)
+            x = F.relu(norm(x))
+            x = F.dropout(x, p=self.dropout, training=self.training)
         return x
 
 
-# ============================================================================
-# 2. Boundary Detection (standalone function)
-# ============================================================================
+class BESMultiViewBackbone(nn.Module):
+    """GCN + GraphSAGE views, replacing dataset-specific pretrained pairs.
+
+    The paper uses two pretrained encoders selected per dataset.  GCN and
+    GraphSAGE provide a reproducible dataset-independent pair for OGB datasets.
+    """
+
+    def __init__(self, in_dim: int, hidden_dim: int, num_layers: int, dropout: float) -> None:
+        super().__init__()
+        self.gcn = BESGraphEncoder(in_dim, hidden_dim, num_layers, dropout, "gcn")
+        self.sage = BESGraphEncoder(in_dim, hidden_dim, num_layers, dropout, "sage")
+
+    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
+        return torch.stack((self.gcn(x, edge_index), self.sage(x, edge_index)), dim=1)
 
 
+class BoundaryAttentionLayer(nn.Module):
+    """Multi-head attention over encoder views with the paper's residual path."""
+
+    def __init__(self, hidden_dim: int, num_heads: int) -> None:
+        super().__init__()
+        if hidden_dim % num_heads != 0:
+            raise ValueError(f"hidden_dim={hidden_dim} 必须能被 bes_num_heads={num_heads} 整除")
+        self.attention = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+
+    def forward(self, views: Tensor) -> Tensor:
+        shaped, _ = self.attention(views, views, views, need_weights=False)
+        return views + shaped
+
+
+class BoundaryAttention(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int = 2, num_layers: int = 2) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList(
+            BoundaryAttentionLayer(hidden_dim, num_heads) for _ in range(num_layers)
+        )
+
+    def forward_views(self, views: Tensor, num_layers: Optional[int] = None) -> Tensor:
+        limit = len(self.layers) if num_layers is None else int(num_layers)
+        for layer in self.layers[:limit]:
+            views = layer(views)
+        return views
+
+    def forward(self, views: Tensor, num_layers: Optional[int] = None) -> Tensor:
+        return self.forward_views(views, num_layers=num_layers).mean(dim=1)
+
+
+@dataclass
+class BESBoundaryState:
+    nodes: Tensor
+    centroids: Tensor
+
+
+@torch.no_grad()
 def detect_boundary_nodes(
     h: Tensor,
     labels: Tensor,
-    train_mask: Tensor,
+    train_indices: Tensor,
     num_classes: int,
     delta: float = 5.0,
-) -> Tuple[Tensor, Tensor]:
-    """Identify boundary nodes using Mahalanobis slab distance.
+    knn_k: int = 5,
+    covariance_reg: float = 1e-4,
+    max_candidates: int = 0,
+) -> BESBoundaryState:
+    """Paper Eq. (4-5): global Mahalanobis slab followed by k-NN shift score.
 
-    Algorithm (faithful to original BES train_eval.py):
-      1. Extract training node embeddings: h_train = h[train_mask]
-      2. Compute per-class centroids (mean embedding per class)
-      3. Compute global covariance matrix Sigma on h_train (with regularization)
-      4. For each training node i with label m:
-         For each other class n ≠ m:
-           slab = | (μ_m - μ_n)ᵀ Σ⁻¹ h_i |
-           If slab ≤ delta → boundary candidate
-      5. Return boundary indices and class centroids
-
-    Args:
-        h: [N, D] all node embeddings.
-        labels: [N] node labels (long).
-        train_mask: [N] boolean mask for training nodes.
-        num_classes: Total number of classes.
-        delta: Mahalanobis threshold (default 5.0).
-
-    Returns:
-        boundary_indices: LongTensor of candidate boundary node indices (may be empty).
-        class_centroids: [num_classes, D] per-class mean embeddings.
+    Statistics use training nodes only.  k-NN is executed with sklearn so the
+    implementation does not materialize the former B x B tensor on the GPU.
+    ``max_candidates=0`` is exact; a positive value enables an explicitly
+    bounded large-graph approximation.
     """
     device = h.device
-    train_h = h[train_mask]                     # [N_train, D]
-    train_labels = labels[train_mask]           # [N_train]
-    train_indices = train_mask.nonzero(as_tuple=False).squeeze(-1)  # [N_train] original indices
+    train_indices = train_indices.to(device=device, dtype=torch.long)
+    train_h = h[train_indices]
+    train_y = labels.to(device)[train_indices].long()
+    centroids = h.new_zeros((num_classes, h.size(1)))
+    present: List[int] = []
+    for class_id in range(num_classes):
+        mask = train_y == class_id
+        if bool(mask.any()):
+            centroids[class_id] = train_h[mask].mean(dim=0)
+            present.append(class_id)
+    if len(present) < 2 or train_h.size(0) < 2:
+        return BESBoundaryState(train_indices.new_empty(0), centroids)
 
-    # --- Class centroids ---
-    class_centroids_list = []
-    for c in range(num_classes):
-        c_mask = (train_labels == c)
-        if c_mask.sum() > 0:
-            class_centroids_list.append(train_h[c_mask].mean(dim=0))
-        else:
-            class_centroids_list.append(torch.zeros(h.size(1), device=device))
-    class_centroids = torch.stack(class_centroids_list)  # [num_classes, D]
-
-    # --- Covariance matrix (regularized) ---
     centered = train_h - train_h.mean(dim=0, keepdim=True)
-    n_train = train_h.size(0)
-    Sigma = (centered.t() @ centered) / (n_train - 1 + 1e-8)
-    Sigma = Sigma + 1e-4 * torch.eye(Sigma.size(0), device=device)
-
-    # Stable inverse (fallback to pseudo-inverse)
+    covariance = centered.T @ centered / max(train_h.size(0) - 1, 1)
+    covariance.diagonal().add_(float(covariance_reg))
     try:
-        Sigma_inv = torch.linalg.inv(Sigma)
+        covariance_inv = torch.linalg.inv(covariance)
     except RuntimeError:
-        Sigma_inv = torch.linalg.pinv(Sigma)
+        covariance_inv = torch.linalg.pinv(covariance)
 
-    # --- Boundary detection (vectorized) ---
-    # Project all training embeddings: proj[i] = Sigma_inv @ h_i  [N_train, D]
-    proj = (Sigma_inv @ train_h.t()).t()  # [N_train, D]
+    # Keep memory O(N + D^2): evaluate each present class pair independently.
+    in_slab = torch.zeros(train_h.size(0), dtype=torch.bool, device=device)
+    for class_id in present:
+        own = (train_y == class_id).nonzero(as_tuple=False).flatten()
+        if own.numel() == 0:
+            continue
+        own_h = train_h[own]
+        for other_id in present:
+            if other_id == class_id:
+                continue
+            direction = (centroids[class_id] - centroids[other_id]) @ covariance_inv
+            slab = (own_h * direction).sum(dim=1).abs()
+            in_slab[own] |= slab <= float(delta)
 
-    # For each node i with class m, slab[i, n] = |(μ_m - μ_n)ᵀ Σ⁻¹ h_i|
-    # = |μ_mᵀ Σ⁻¹ h_i - μ_nᵀ Σ⁻¹ h_i| = |dot(train_centroids[i], proj[i]) - dot(centroids[n], proj[i])|
-    train_centroids_h = class_centroids[train_labels]  # [N_train, D]
-    dot_own = (train_centroids_h * proj).sum(dim=1)    # [N_train]
-    dot_all = proj @ class_centroids.t()                # [N_train, C]
-    slab = torch.abs(dot_own.unsqueeze(1) - dot_all)   # [N_train, C]
+    candidates = train_indices[in_slab]
+    if candidates.numel() <= 1:
+        return BESBoundaryState(train_indices.new_empty(0), centroids)
+    if max_candidates > 0 and candidates.numel() > max_candidates:
+        perm = torch.randperm(candidates.numel(), device=device)[:max_candidates]
+        candidates = candidates[perm]
 
-    # Mask out own class
-    own_mask = torch.zeros(train_h.size(0), num_classes, dtype=torch.bool, device=device)
-    own_mask[torch.arange(train_h.size(0), device=device), train_labels] = True
-    slab.masked_fill_(own_mask, float('inf'))
-
-    # Boundary condition: any n ≠ m has slab <= delta
-    boundary_mask = (slab <= delta).any(dim=1)  # [N_train]
-    boundary_indices = train_indices[boundary_mask]
-
-    return boundary_indices, class_centroids
-
-
-# ============================================================================
-# 3. Repulsion Loss (standalone function)
-# ============================================================================
+    candidate_h = h[candidates].detach().float().cpu().numpy()
+    candidate_y = labels[candidates.cpu()].detach().cpu().numpy() if labels.device.type == "cpu" else labels[candidates].detach().cpu().numpy()
+    k = min(int(knn_k), candidates.numel() - 1)
+    nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm="auto", n_jobs=-1)
+    neighbor_ids = nbrs.fit(candidate_h).kneighbors(
+        candidate_h, return_distance=False
+    )[:, 1:]
+    mismatch = (candidate_y[neighbor_ids] != candidate_y[:, None]).mean(axis=1)
+    active = torch.from_numpy(np.flatnonzero(mismatch > 0.5)).to(device)
+    return BESBoundaryState(candidates[active], centroids)
 
 
 def compute_repulsion_loss(
     h: Tensor,
-    boundary_indices: Tensor,
+    boundary_nodes: Tensor,
     labels: Tensor,
     class_centroids: Tensor,
-    num_classes: int,
     tau: float = 1.0,
     beta_size: int = 256,
 ) -> Tensor:
-    """Gravitational repulsion loss for boundary nodes.
-
-    Algorithm (faithful to original BES train_eval.py):
-      1. Among boundary candidates, find k=5 nearest neighbors in embedding space.
-      2. A node is "active" if >50% of its k-NN have a DIFFERENT class label.
-         This filters for nodes truly straddling decision boundaries.
-      3. Randomly sample up to beta_size active boundary nodes.
-      4. InfoNCE-style loss with class centroids as anchors:
-         - Positive: exp(-max(0, dist_to_own_centroid - min_dist_to_other)^2 / tau)
-         - Negative: Σ_{c≠m} exp(-dist_to_centroid_c^2 / tau)
-         - L = -log(pos / (pos + neg_sum))
-
-    Args:
-        h: [N, D] all node embeddings.
-        boundary_indices: [B] candidate boundary node indices.
-        labels: [N] node labels (long).
-        class_centroids: [num_classes, D] pre-computed centroids.
-        num_classes: Total number of classes.
-        tau: Temperature for InfoNCE loss (default 1.0).
-        beta_size: Max boundary nodes per loss computation (default 256).
-
-    Returns:
-        Scalar repulsion loss. Returns 0.0 (with grad) if no active boundary nodes.
-    """
-    if boundary_indices.numel() < 2:
-        return torch.tensor(0.0, device=h.device, requires_grad=True)
-
-    device = h.device
-
-    # --- k-NN filtering: keep nodes whose neighbors have mixed labels ---
-    B_Phi = h[boundary_indices]   # [B, D]
-    B_labels = labels[boundary_indices]  # [B]
-
-    dist_B = torch.cdist(B_Phi, B_Phi)  # [B, B]
-    k_nn = min(5, B_Phi.size(0) - 1)
-    _, knn_idx = torch.topk(dist_B, k=k_nn + 1, dim=1, largest=False)
-    knn_idx = knn_idx[:, 1:]  # exclude self (index 0)
-
-    knn_labels = B_labels[knn_idx]  # [B, k]
-    mismatch = (knn_labels != B_labels.unsqueeze(1)).float()  # [B, k]
-    S_v = mismatch.mean(dim=1)  # [B] shift score
-
-    boundary_nodes = boundary_indices[S_v > 0.5]  # active boundary nodes
-
+    """Official center-based gravity loss (paper Eq. 9-10)."""
+    if tau <= 0:
+        raise ValueError("bes_tau 必须 > 0")
     if boundary_nodes.numel() == 0:
-        return torch.tensor(0.0, device=device, requires_grad=True)
+        return h.sum() * 0.0
+    if boundary_nodes.numel() > beta_size:
+        perm = torch.randperm(boundary_nodes.numel(), device=h.device)[:beta_size]
+        boundary_nodes = boundary_nodes[perm]
 
-    # --- Sample up to beta_size active boundary nodes ---
-    if boundary_nodes.size(0) > beta_size:
-        perm = torch.randperm(boundary_nodes.size(0), device=device)[:beta_size]
-        batch_idx = boundary_nodes[perm]
-    else:
-        batch_idx = boundary_nodes
+    z = h[boundary_nodes]
+    y = labels.to(h.device)[boundary_nodes].long()
+    return compute_gravity_loss(z, y, class_centroids, tau)
 
-    Z_batch = h[batch_idx]                  # [beta, D]
-    y_batch = labels[batch_idx]             # [beta]
 
-    # --- Repulsion loss (InfoNCE with class centroids as anchors) ---
-    dist_to_pos = torch.norm(Z_batch - class_centroids[y_batch], dim=1)  # [beta]
-    dist_to_all = torch.cdist(Z_batch, class_centroids)                  # [beta, num_classes]
-
-    # Mask out own class for negative computation
-    neg_mask = torch.ones((Z_batch.size(0), num_classes), dtype=torch.bool, device=device)
-    neg_mask[torch.arange(Z_batch.size(0), device=device), y_batch] = False
-
-    dist_to_all_masked = dist_to_all.clone()
-    dist_to_all_masked[~neg_mask] = float('inf')
-    min_dist_to_neg, _ = torch.min(dist_to_all_masked, dim=1)  # [beta]
-
-    # Positive: margin-based similarity (node closer to own centroid than others → high sim)
-    sim_pos = -torch.clamp(dist_to_pos - min_dist_to_neg, min=0.0).pow(2)  # [beta]
-    # Negative: squared distance to all centroids
-    sim_neg = -dist_to_all.pow(2)  # [beta, num_classes]
-
-    numerator = torch.exp(sim_pos / tau)  # [beta]
-    exp_sim_neg = torch.exp(sim_neg / tau) * neg_mask.float()  # [beta, num_classes]
-    denominator = numerator + exp_sim_neg.sum(dim=1)  # [beta]
-
-    gravity_loss = -torch.log(numerator / (denominator + 1e-8)).mean()
-
-    return gravity_loss
+def compute_gravity_loss(
+    z: Tensor,
+    labels: Tensor,
+    class_centroids: Tensor,
+    tau: float = 1.0,
+) -> Tensor:
+    """Gravity loss for an already sampled boundary-node batch."""
+    if tau <= 0:
+        raise ValueError("bes_tau 必须 > 0")
+    if z.numel() == 0:
+        return z.sum() * 0.0
+    y = labels.to(z.device).long()
+    centers = class_centroids.to(z.device).detach()
+    dist_pos = torch.norm(z - centers[y], dim=1)
+    dist_all = torch.cdist(z, centers)
+    negative_mask = torch.ones_like(dist_all, dtype=torch.bool)
+    negative_mask[torch.arange(z.size(0), device=z.device), y] = False
+    min_negative = dist_all.masked_fill(~negative_mask, float("inf")).min(dim=1).values
+    sim_pos = -torch.clamp(dist_pos - min_negative, min=0.0).square()
+    sim_neg = -dist_all.square()
+    numerator = torch.exp(sim_pos / float(tau))
+    denominator = numerator + (torch.exp(sim_neg / float(tau)) * negative_mask).sum(dim=1)
+    return -torch.log(numerator / denominator.clamp_min(1e-8)).mean()

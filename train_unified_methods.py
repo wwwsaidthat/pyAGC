@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import random
+import subprocess
 import sys
 import time
 import warnings
@@ -24,6 +25,7 @@ import numpy as np
 import platform
 import torch
 import torch.nn as nn
+import yaml
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch import Tensor
@@ -47,6 +49,8 @@ from unified_methods import (
     GAEWithMRLMethod,
     LRGAEMethod,
     BESMethod,
+    BESWithMRLMethod,
+    BESCSNEMethod,
 )
 
 
@@ -304,7 +308,7 @@ def build_run_dirs(args: argparse.Namespace) -> tuple[Path, Path]:
     tag = f"hd{int(args.hidden_dim)}_l{int(args.num_layers)}"
     if args.method.startswith("grace"):
         tag = f"{tag}_pd{int(args.proj_dim)}"
-    if "mrl" in args.method:
+    if "mrl" in args.method or args.method == "bes_csne":
         tag = f"{tag}_mrl{max(parse_dims(args.mrl_dims))}"
     run_name = f"{stable_run_id(args)}_{tag}"
 
@@ -380,7 +384,12 @@ def ensure_local_dataset_ready(dataset: str, root: str) -> None:
         raise ValueError(f"不支持的数据集: {dataset}")
 
 
-def load_dataset(dataset: str, root: str, logger: Optional[logging.Logger] = None) -> DatasetBundle:
+def load_dataset(
+    dataset: str,
+    root: str,
+    logger: Optional[logging.Logger] = None,
+    normalize_ogb_features: bool = True,
+) -> DatasetBundle:
     """加载本地数据和官方 split。"""
     ensure_local_dataset_ready(dataset, root)
     x, edge_index, y, train_idx, val_idx, test_idx = get_dataset(
@@ -391,7 +400,7 @@ def load_dataset(dataset: str, root: str, logger: Optional[logging.Logger] = Non
     # OGB 数据集（arxiv/mag/products）的特征未经 T.NormalizeFeatures 处理，
     # 对依赖余弦相似度的对比学习方法（GRACE/DGI/CCA-SSG），
     # 行归一化能显著提升训练稳定性。
-    if dataset in ("arxiv", "mag", "products"):
+    if normalize_ogb_features and dataset in ("arxiv", "mag", "products"):
         x = torch.nn.functional.normalize(x, p=2, dim=1)
     data = Data(x=x, edge_index=edge_index, y=y.long())
     num_classes = int(data.y.max().item()) + 1
@@ -733,8 +742,13 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             num_layers=args.num_layers,
             dropout=args.dropout,
             neg_ratio=args.neg_ratio,
-            lrgae_rank=getattr(args, "lrgae_rank", None),
-            add_self_loops=getattr(args, "lrgae_add_self_loops", False),
+            variant=args.lrgae_variant,
+            mask_ratio=args.lrgae_mask_ratio,
+            decoder_dim=args.lrgae_decoder_dim,
+            decoder_layers=args.lrgae_decoder_layers,
+            decoder_dropout=args.lrgae_decoder_dropout,
+            decoder_batch_size=args.lrgae_decoder_batch_size,
+            grad_norm=args.lrgae_grad_norm,
             use_amp=args.amp,
         )
     if args.method == "bes":
@@ -747,6 +761,51 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             delta=getattr(args, "bes_delta", 5.0),
             alpha=getattr(args, "bes_alpha", 1.0),
             num_classes=num_classes,
+            total_epochs=args.pretrain_epochs,
+            backbone_epochs=args.bes_backbone_epochs,
+            num_heads=args.bes_num_heads,
+            attention_layers=args.bes_attention_layers,
+            beta_size=args.bes_beta_size,
+            boundary_knn=args.bes_boundary_knn,
+            covariance_reg=args.bes_covariance_reg,
+            max_boundary_candidates=args.bes_max_boundary_candidates,
+            displacement_batch_size=args.bes_displacement_batch_size,
+        )
+    if args.method in ("bes_mrl", "bes_csne"):
+        common = dict(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            tau=args.bes_tau,
+            delta=args.bes_delta,
+            alpha=args.bes_alpha,
+            num_classes=num_classes,
+            total_epochs=args.pretrain_epochs,
+            backbone_epochs=args.bes_backbone_epochs,
+            num_heads=args.bes_num_heads,
+            attention_layers=args.bes_attention_layers,
+            beta_size=args.bes_beta_size,
+            boundary_knn=args.bes_boundary_knn,
+            covariance_reg=args.bes_covariance_reg,
+            max_boundary_candidates=args.bes_max_boundary_candidates,
+            displacement_batch_size=args.bes_displacement_batch_size,
+            mrl_dims=mrl_dims,
+            mrl_weight=args.mrl_weight,
+        )
+        if args.method == "bes_mrl":
+            return BESWithMRLMethod(**common)
+        return BESCSNEMethod(
+            **common,
+            csne_weight=args.bes_csne_weight,
+            ml_weight=args.ml_weight,
+            ml_module=args.ml_module,
+            hpem_beta_init=args.hpem_beta_init,
+            hpem_tau_0=args.hpem_tau_0,
+            csne_warmup_epochs=args.bes_csne_warmup_epochs,
+            csne_batch_size=args.bes_csne_batch_size,
+            view_mask_1=args.p_feat_mask_1,
+            view_mask_2=args.p_feat_mask_2,
         )
     raise ValueError(f"未知方法: {args.method}")
 
@@ -969,19 +1028,38 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
         if hasattr(method, 'manages_own_optimizer') and method.manages_own_optimizer:
             optimizer = None  # Will be ignored; method handles optimization internally
         else:
+            initial_pretrain_lr = (
+                float(args.bes_backbone_lr)
+                if args.method.startswith("bes")
+                else float(args.pretrain_lr)
+            )
             optimizer = torch.optim.Adam(
                 method.parameters(),
-                lr=args.pretrain_lr,
+                lr=initial_pretrain_lr,
                 weight_decay=args.pretrain_weight_decay,
             )
         best_ssl = float("inf")
         best_ssl_epoch = 0
+        best_ssl_state: Optional[Dict[str, Tensor]] = None
         ssl_stop_epoch = 0
         ssl_patience_left = int(args.pretrain_patience)
+        # BES has ordered backbone/attention stages; loss values across stages
+        # are not comparable and stopping early would leave later layers untrained.
+        effective_ssl_early_stop = bool(args.pretrain_early_stop) and not args.method.startswith("bes")
         for ep in range(1, args.pretrain_epochs + 1):
             # 更新 epoch（用于 verbose 模式打印）
             if hasattr(method, "epoch"):
                 method.epoch = ep
+
+            if (args.method.startswith("bes")
+                    and ep == args.bes_backbone_epochs + 1):
+                for pg in optimizer.param_groups:
+                    pg["lr"] = float(args.pretrain_lr)
+                logger.info(
+                    "BES shaping 阶段开始 | backbone 已冻结 | lr 切换: %.6f -> %.6f",
+                    float(args.bes_backbone_lr),
+                    float(args.pretrain_lr),
+                )
 
             # grace_ML / CSNE 两阶段：进入第二阶段时切换学习率
             if (args.method in ("grace_ml", "csne")
@@ -1019,11 +1097,15 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
                         parts.append(f"{k}={v:.4f}")
                     if parts:
                         extra_info = " | " + " | ".join(parts)
-            if args.pretrain_early_stop and (ep % int(args.pretrain_eval_every) == 0 or ep == args.pretrain_epochs):
+            if effective_ssl_early_stop and (ep % int(args.pretrain_eval_every) == 0 or ep == args.pretrain_epochs):
                 logger.info("Pretrain Epoch %03d | loss=%.4f%s", ep, loss, extra_info)
                 if loss < best_ssl - float(args.pretrain_min_delta):
                     best_ssl = float(loss)
                     best_ssl_epoch = int(ep)
+                    best_ssl_state = {
+                        key: value.detach().cpu().clone()
+                        for key, value in method.state_dict().items()
+                    }
                     ssl_patience_left = int(args.pretrain_patience)
                 else:
                     ssl_patience_left -= 1
@@ -1038,6 +1120,9 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
                         break
             else:
                 logger.info("Pretrain Epoch %03d | loss=%.4f%s", ep, loss, extra_info)
+        if effective_ssl_early_stop and best_ssl_state is not None:
+            method.load_state_dict(best_ssl_state)
+            logger.info("恢复预训练最佳模型 | epoch=%d | loss=%.6f", best_ssl_epoch, best_ssl)
         # 训练结束后打印诊断信息（embedding 范数、logit 尺度、饱和度）
         if hasattr(method, "diagnose"):
             try:
@@ -1069,11 +1154,11 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
             "output_dim": out_dim,
             "checkpoint_path": str(ckpt_path),
             "train_mode": "ssl",
-            "pretrain_early_stop": bool(args.pretrain_early_stop),
-            "pretrain_best_loss": float(best_ssl) if args.pretrain_early_stop else None,
-            "pretrain_best_epoch": int(best_ssl_epoch) if args.pretrain_early_stop else None,
+            "pretrain_early_stop": effective_ssl_early_stop,
+            "pretrain_best_loss": float(best_ssl) if effective_ssl_early_stop else None,
+            "pretrain_best_epoch": int(best_ssl_epoch) if effective_ssl_early_stop else None,
             "pretrain_stop_epoch": int(ssl_stop_epoch if ssl_stop_epoch > 0 else min(args.pretrain_epochs, best_ssl_epoch))
-            if args.pretrain_early_stop
+            if effective_ssl_early_stop
             else None,
         }
 
@@ -1191,7 +1276,7 @@ def evaluate_once(
         "test_metrics": test_metrics,
         "checkpoint_path": str(checkpoint_path),
     }
-    if "mrl" in args.method:
+    if "mrl" in args.method or args.method == "bes_csne":
         result["mrl_dims"] = parse_dims(args.mrl_dims)
     if mrl_dim_test_accuracy:
         result["mrl_dim_test_accuracy"] = mrl_dim_test_accuracy
@@ -1302,7 +1387,7 @@ def save_results(
         "mean_pm_variance": f"{stats['mean']:.4f} ± {stats['variance']:.6f}",
         "per_eval_results": eval_results,
     }
-    if "mrl" in args.method:
+    if "mrl" in args.method or args.method == "bes_csne":
         summary["mrl_dims"] = parse_dims(args.mrl_dims)
     if mrl_dim_accuracy_stats:
         summary["mrl_dim_accuracy_stats"] = mrl_dim_accuracy_stats
@@ -1392,9 +1477,13 @@ def parse_args() -> argparse.Namespace:
             "gae_mrl",
             "lrgae",
             "bes",
+            "bes_mrl",
+            "bes_csne",
         ],
     )
     p.add_argument("--dataset", type=str, required=True, choices=["arxiv", "reddit2", "products", "mag"])
+    p.add_argument("--config", type=str, default=None,
+                   help="YAML 配置文件；命令行显式参数优先于 YAML")
     p.add_argument("--root", type=str, default="./data")
     p.add_argument("--mode", type=str, default="auto", choices=["auto", "full", "neighbor"])
     p.add_argument("--gpu-id", type=str, default="auto", help="auto/cpu/0/1...")
@@ -1402,6 +1491,8 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--num-layers", type=int, default=2)
     p.add_argument("--hidden-dim", type=int, default=256)
+    p.add_argument("--run-dims", type=str, default=None,
+                   help="依次独立训练多个维度，例如 32,64,128,256,384,512,768")
     p.add_argument("--dropout", type=float, default=0.5)
     p.add_argument("--proj-dim", type=int, default=256, help="GRACE 投影维度")
     p.add_argument("--tau", type=float, default=0.5, help="GRACE 温度系数")
@@ -1475,12 +1566,46 @@ def parse_args() -> argparse.Namespace:
                    help="BES Mahalanobis 边界检测阈值")
     p.add_argument("--bes-alpha", type=float, default=1.0,
                    help="BES virtual step 缩放因子")
+    p.add_argument("--bes-backbone-epochs", type=int, default=None,
+                   help="双视角 GNN 监督预训练轮数；默认 pretrain-epochs 的一半")
+    p.add_argument("--bes-backbone-lr", type=float, default=0.005,
+                   help="双视角 GNN 监督预训练学习率；shaping 阶段切回 pretrain-lr")
+    p.add_argument("--bes-num-heads", type=int, default=2,
+                   help="Boundary attention 的头数")
+    p.add_argument("--bes-attention-layers", type=int, default=2,
+                   help="顺序训练的 boundary attention 层数")
+    p.add_argument("--bes-beta-size", type=int, default=256,
+                   help="每次 gravity update 采样的边界节点数")
+    p.add_argument("--bes-boundary-knn", type=int, default=5,
+                   help="边界 shift score 使用的 embedding kNN 数")
+    p.add_argument("--bes-covariance-reg", type=float, default=1e-4,
+                   help="全局协方差矩阵的对角正则项")
+    p.add_argument("--bes-max-boundary-candidates", type=int, default=0,
+                   help="边界候选上限；0 为论文式全量，超大图可设 50000")
+    p.add_argument("--bes-displacement-batch-size", type=int, default=4096,
+                   help="全局 virtual displacement 的分块大小")
+    p.add_argument("--bes-csne-weight", type=float, default=1.0,
+                   help="实验性 BES_CSNE 损失权重")
+    p.add_argument("--bes-csne-warmup-epochs", type=int, default=25,
+                   help="BES shaping 阶段内 CSNE warmup 轮数")
+    p.add_argument("--bes-csne-batch-size", type=int, default=1024,
+                   help="BES_CSNE 对比损失节点采样数")
 
     # ---- LRGAE 特有参数 ----
-    p.add_argument("--lrgae-rank", type=int, default=None,
-                   help="LRGAE SVD 截断秩，默认等于 hidden_dim")
-    p.add_argument("--lrgae-add-self-loops", action="store_true", default=False,
-                   help="归一化邻接矩阵是否加自环（GCN-style Â）")
+    p.add_argument("--lrgae-variant", type=int, default=8, choices=[5, 6, 7, 8],
+                   help="结构型 left-right GAE 变体，默认 lrGAE-8")
+    p.add_argument("--lrgae-mask-ratio", type=float, default=0.7,
+                   help="互补图视图的无向边掩码比例")
+    p.add_argument("--lrgae-decoder-dim", type=int, default=32,
+                   help="lrGAE MLP 边解码器隐藏维度")
+    p.add_argument("--lrgae-decoder-layers", type=int, default=2,
+                   help="lrGAE MLP 边解码器层数")
+    p.add_argument("--lrgae-decoder-dropout", type=float, default=0.2,
+                   help="lrGAE MLP 边解码器 dropout")
+    p.add_argument("--lrgae-decoder-batch-size", type=int, default=131072,
+                   help="lrGAE 边解码分块大小，用于控制高维训练显存")
+    p.add_argument("--lrgae-grad-norm", type=float, default=1.0,
+                   help="lrGAE 梯度裁剪阈值；<=0 表示关闭")
 
     p.add_argument("--eval-only", action="store_true",
                    help="仅评估模式：跳过训练，直接从 --checkpoint 加载模型进行PCA/标准评估")
@@ -1489,13 +1614,73 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--output-dir", type=str, default="./results")
     p.add_argument("--log-level", type=str, default="INFO")
-    return p.parse_args()
+
+    args = p.parse_args()
+    if args.config:
+        config_path = Path(args.config).expanduser().resolve()
+        with config_path.open("r", encoding="utf-8") as handle:
+            raw_config = yaml.safe_load(handle) or {}
+        merged: Dict[str, Any] = {}
+        merged.update(raw_config.get("default", {}))
+        merged.update(raw_config.get(args.dataset, {}))
+
+        explicit = set()
+        argv = sys.argv[1:]
+        for action in p._actions:
+            if any(
+                token == option or token.startswith(option + "=")
+                for token in argv
+                for option in action.option_strings
+            ):
+                explicit.add(action.dest)
+
+        for key, value in merged.items():
+            if not hasattr(args, key):
+                raise ValueError(f"配置文件包含未知参数: {key}")
+            if key not in explicit:
+                setattr(args, key, value)
+    return args
+
+
+def run_dimension_sweep(dimensions: str) -> None:
+    """Run each representation dimension in an isolated process."""
+    dims = parse_dims(dimensions)
+    argv = sys.argv[1:]
+    child_args: List[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in {"--run-dims", "--hidden-dim"}:
+            skip_next = True
+            continue
+        if token.startswith("--run-dims=") or token.startswith("--hidden-dim="):
+            continue
+        child_args.append(token)
+
+    for dim in dims:
+        print(f"\n{'=' * 24} representation dimension={dim} {'=' * 24}", flush=True)
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                *child_args,
+                "--hidden-dim",
+                str(dim),
+            ],
+            cwd=str(project_root()),
+            check=True,
+        )
 
 
 def main() -> None:
     """程序入口。"""
     try:
         args = parse_args()
+        if args.run_dims:
+            run_dimension_sweep(args.run_dims)
+            return
         t_start = time.time()
 
         # grace_ML / CSNE 两阶段 epoch 处理：支持显式指定两个阶段的训练轮数
@@ -1509,8 +1694,17 @@ def main() -> None:
             args.grace_only_epochs = args.pretrain_epochs // 2
             args.grace_ml_epochs = args.pretrain_epochs - args.grace_only_epochs
 
+        if args.bes_backbone_epochs is None:
+            args.bes_backbone_epochs = args.pretrain_epochs // 2
+
         enable_torch26_compat()
-        bundle = load_dataset(args.dataset, args.root, logger=None)  # logger 尚未初始化，先 None
+        bundle = load_dataset(
+            args.dataset,
+            args.root,
+            logger=None,
+            # The official lrGAE protocol consumes the original node features.
+            normalize_ogb_features=args.method != "lrgae",
+        )
 
         train_seed = 0
         eval_seeds = [0, 1, 2, 3, 4]
@@ -1706,7 +1900,7 @@ def main() -> None:
                     "test_metrics": test_metrics,
                     "checkpoint_path": str(checkpoint_path),
                 }
-                if "mrl" in args.method:
+                if "mrl" in args.method or args.method == "bes_csne":
                     result["mrl_dims"] = parse_dims(args.mrl_dims)
                 if mrl_dim_test_accuracy:
                     result["mrl_dim_test_accuracy"] = mrl_dim_test_accuracy

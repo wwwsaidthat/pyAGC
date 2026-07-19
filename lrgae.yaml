@@ -1,92 +1,67 @@
-# LRGAE: Low-Rank Graph Auto-Encoder
+# lrGAE: left-right Graph Auto-Encoder
+# Li et al., "Revisiting and Benchmarking Graph Autoencoders"
 #
-# 通过重建归一化邻接矩阵的 PSD 低秩谱近似来学习节点嵌入。
-# 使用 eigsh(which='LA') 取正特征值，保证目标与单内积 decoder 兼容。
+# 单维度:
+#   python train_unified_methods.py --config lrgae.yaml --method lrgae \
+#     --dataset arxiv --hidden-dim 128
 #
-# 支持维度: 32, 64, 128, 256, 384, 512, 768
-# 支持数据集: ogbn-arxiv, ogbn-products, ogbn-mag
-#
-# 运行示例:
-#   python train_unified_methods.py --method lrgae --dataset arxiv --hidden-dim 64
-#   python train_unified_methods.py --method lrgae --dataset products --hidden-dim 128
+# 七个维度依次独立训练:
+#   python train_unified_methods.py --config lrgae.yaml --method lrgae \
+#     --dataset arxiv --run-dims 32,64,128,256,384,512,768
 
 default:
-  # --- 训练参数 ---
   method: lrgae
-  pretrain_lr: 0.001
-  pretrain_weight_decay: 0.0
-  pretrain_epochs: 200
-  pretrain_patience: 20
-  pretrain_min_delta: 1e-4
-  pretrain_eval_every: 1
-  pretrain_input: all
-  pretrain_early_stop: true
 
-  # --- 模型参数 ---
-  hidden_dim: 64
+  # 官方 node-classification lrGAE-vu 的核心设置。
   num_layers: 2
-  dropout: 0.5
+  hidden_dim: 128
+  dropout: 0.8
+  lrgae_variant: 8
+  lrgae_mask_ratio: 0.7
+  lrgae_decoder_dim: 32
+  lrgae_decoder_layers: 2
+  lrgae_decoder_dropout: 0.2
+  lrgae_decoder_batch_size: 131072
+  lrgae_grad_norm: 1.0
+  neg_ratio: 1.0
 
-  # --- LRGAE 特有参数 ---
-  lrgae_rank: 64                   # 特征值保留数，默认 = hidden_dim
-  lrgae_add_self_loops: false      # 归一化邻接是否加自环（GCN-style Â）
-  neg_ratio: 1.0                   # 负边比例，大图建议 0.25--0.5
-  amp: false                       # 自动混合精度
+  pretrain_lr: 0.01
+  pretrain_weight_decay: 0.00005
+  pretrain_epochs: 500
+  pretrain_input: all
+  pretrain_early_stop: false
+  amp: false
 
-  # --- 评估参数 ---
-  mode: auto
+  # 冻结编码器后训练线性分类器。
   cls_epochs: 200
   cls_lr: 0.01
-  cls_weight_decay: 0.0
+  cls_weight_decay: 0.00005
   cls_batch_size: 8192
   cls_early_stop: true
   cls_patience: 20
-  cls_min_delta: 1e-4
-  batch_size: 1024
-  eval_batch_size: 4096
-  num_neighbors: [15, 10]
-  eval_num_neighbors: [-1, -1]
-  eval_seeds: [0, 1, 2, 3, 4]
+  cls_min_delta: 0.0001
 
-  # --- 资源 ---
   gpu_id: auto
   infer_device: auto
   log_level: INFO
 
-
-# ============================================================================
-# ogbn-arxiv (169K nodes — 全图约 6GB)
-# ============================================================================
 arxiv:
-  pretrain_epochs: 200
-  mode: neighbor
-  # Self-loops 使 Â 更接近 GCN 传播矩阵，训练目标更一致
-  lrgae_add_self_loops: true
+  # 官方目标依赖全局真边排除负样本；arxiv 在常见 24GB GPU 上可全图训练。
+  mode: full
+  eval_batch_size: 4096
 
-
-# ============================================================================
-# ogbn-products (2.4M nodes — 需要 Neighbor 采样)
-# ============================================================================
 products:
-  pretrain_epochs: 20
   mode: neighbor
   batch_size: 4096
   eval_batch_size: 2048
   num_neighbors: [10, 5]
   eval_num_neighbors: [-1, -1]
   neg_ratio: 0.5
-  lrgae_add_self_loops: true
 
-
-# ============================================================================
-# ogbn-mag (heterogeneous, 需要 Neighbor 采样)
-# ============================================================================
 mag:
-  pretrain_epochs: 50
   mode: neighbor
   batch_size: 4096
   eval_batch_size: 2048
   num_neighbors: [10, 5]
   eval_num_neighbors: [-1, -1]
   neg_ratio: 0.5
-  lrgae_add_self_loops: true

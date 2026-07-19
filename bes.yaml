@@ -1,5 +1,4 @@
-# BES: Bootstrapped Embedding Selection
-# ICML 2026.
+# BES: Boundary Embedding Shaping (ICML 2026)
 #
 # 支持维度: 32, 64, 128, 256, 384, 512, 768
 # 支持数据集: ogbn-arxiv, ogbn-products, ogbn-mag
@@ -18,7 +17,7 @@ default:
   pretrain_min_delta: 1e-4
   pretrain_eval_every: 1
   pretrain_input: train          # BES 只用训练节点做边界检测
-  pretrain_early_stop: true
+  pretrain_early_stop: false       # BES 分阶段训练，不跨阶段比较 loss 早停
 
   # --- 模型参数 ---
   hidden_dim: 64                 # 可覆盖为 32/64/128/256/384/512/768
@@ -29,6 +28,15 @@ default:
   bes_tau: 1.0                   # 排斥损失温度
   bes_delta: 5.0                 # Mahalanobis 边界检测阈值
   bes_alpha: 1.0                 # Virtual step 缩放因子
+  bes_backbone_epochs: 100       # 双视角 GNN 预训练，之后冻结
+  bes_backbone_lr: 0.005         # arxiv GNN backbone 预训练学习率
+  bes_num_heads: 2
+  bes_attention_layers: 2
+  bes_beta_size: 256
+  bes_boundary_knn: 5
+  bes_covariance_reg: 0.0001
+  bes_max_boundary_candidates: 50000  # OGB 大图的显式近似；论文式全量请设 0
+  bes_displacement_batch_size: 4096
 
   # --- 评估参数 ---
   mode: auto
@@ -43,8 +51,6 @@ default:
   eval_batch_size: 4096
   num_neighbors: [15, 10]
   eval_num_neighbors: [-1, -1]
-  eval_seeds: [0, 1, 2, 3, 4]
-
   # --- 资源 ---
   gpu_id: auto
   infer_device: auto
@@ -57,6 +63,7 @@ default:
 arxiv:
   pretrain_epochs: 200
   mode: neighbor
+  eval_num_neighbors: [30, 20]
 
 
 # ============================================================================
@@ -64,11 +71,12 @@ arxiv:
 # ============================================================================
 products:
   pretrain_epochs: 20
+  bes_backbone_epochs: 10
   mode: neighbor
   batch_size: 4096
   eval_batch_size: 2048
   num_neighbors: [10, 5]
-  eval_num_neighbors: [-1, -1]
+  eval_num_neighbors: [20, 10]
 
 
 # ============================================================================
@@ -76,8 +84,9 @@ products:
 # ============================================================================
 mag:
   pretrain_epochs: 50
+  bes_backbone_epochs: 25
   mode: neighbor
   batch_size: 4096
   eval_batch_size: 2048
   num_neighbors: [10, 5]
-  eval_num_neighbors: [-1, -1]
+  eval_num_neighbors: [20, 10]
