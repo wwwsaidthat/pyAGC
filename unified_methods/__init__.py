@@ -15,9 +15,9 @@ from .ssge_mrl_method import SSGEWithMRLMethod
 from .gae_method import GAEMethod
 from .gae_mrl_method import GAEWithMRLMethod
 from .lrgae_method import LRGAEMethod
-from .bes_method import BESMethod
-from .bes_mrl_method import BESWithMRLMethod
-from .bes_csne_method import BESCSNEMethod
+from .graphcl_method import GraphCLMethod
+from .graphcl_mrl_method import GraphCLWithMRLMethod
+from .graphcl_csne_method import GraphCLCSNEMethod
 
 __all__ = [
     "BaseMethod",
@@ -35,7 +35,7 @@ __all__ = [
     "GAEMethod",
     "GAEWithMRLMethod",
     "LRGAEMethod",
-    "BESMethod",
-    "BESWithMRLMethod",
-    "BESCSNEMethod",
+    "GraphCLMethod",
+    "GraphCLWithMRLMethod",
+    "GraphCLCSNEMethod",
 ]

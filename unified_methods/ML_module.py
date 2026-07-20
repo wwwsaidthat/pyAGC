@@ -57,23 +57,20 @@ def compute_cross_view_similarity_matrix(z1: Tensor, z2: Tensor, eps: float = 1e
 # Step 2: 温度缩放 + softmax（在拉平后的 B² 向量上操作）
 # ============================================================================
 
-def temperature_softmax(logits: Tensor) -> Tensor:
-    r"""将 logits 转化为非负值（ReLU），保留正相似度、抑制负相似度。
+def temperature_softmax(logits: Tensor, tau: float = 0.5) -> Tensor:
+    r"""用温度缩放 softmax 将 logits 转成合法概率分布。
 
-    prob = ReLU(logits)
-
-    与原始 softmax 的区别：
-        - ReLU 直接截断负值，不做归一化，保留原始量级
-        - 避免 softmax 的归一化迫使所有值参与竞争
+    prob = softmax(logits / tau)
 
     参数:
         logits: 任意形状的 Tensor
 
     返回:
-        prob: 非负值，与 logits 同形状
+        prob: 和为 1 的概率分布，与 logits 同形状
     """
-    prob = F.relu(logits)
-    return prob
+    if tau <= 0:
+        raise ValueError(f"CDMD temperature 必须 > 0，当前为 {tau}")
+    return F.softmax(logits / tau, dim=-1)
 
 
 # ============================================================================
@@ -104,10 +101,8 @@ def symmetric_kl_divergence(p: Tensor, q: Tensor, eps: float = 1e-12) -> Tensor:
     # KL(q || p): p 作为目标 detach，梯度只流经 q
     kl_qp = (q * (q_clamp.log() - p_clamp.detach().log())).sum()
 
-    # 除以 B（batch size）做归一化，使 loss 与 batch size 无关
-    # p/q 是 B×B 矩阵拉平得到的 B² 维向量，B = sqrt(numel)
-    B = int(p.numel() ** 0.5)
-    loss = 0.5 * (kl_pq + kl_qp) / B
+    # p/q 已由 softmax 归一化，KL 本身不需要再除以 batch size。
+    loss = 0.5 * (kl_pq + kl_qp)
     return loss
 
 
@@ -120,12 +115,13 @@ def compute_mutual_learning_loss_v4(
     z2_full: Tensor,
     mrl_dims: Sequence[int],
     ml_weight: float = 1.0,
+    tau: float = 0.5,
 ) -> Tensor:
-    r"""完整的互学习损失计算 pipeline（v4 — 全矩阵 B×B 相似度，ReLU 激活）。
+    r"""完整的互学习损失 pipeline（v4 — 全矩阵 B×B 相似度 + softmax）。
 
     对每对相邻维度 (i-1, i):
     1. 切片 z[:, :dim]，计算 B×B 跨视图相似度矩阵
-    2. 拉平 → ReLU → B² 维非负值
+    2. 拉平 → temperature-softmax → B² 维概率分布
     3. 对称 KL 散度
 
     总损失 = ml_weight × 均值(所有相邻对的对称 KL)
@@ -147,18 +143,18 @@ def compute_mutual_learning_loss_v4(
     sorted_dims = sorted(mrl_dims)
     ml_sum = torch.zeros((), device=z1_full.device)
 
-    # 先算第一个维度的 B×B 矩阵 → flatten → ReLU
+    # 先算第一个维度的 B×B 矩阵 → flatten → temperature-softmax
     prev_z1 = z1_full[:, :sorted_dims[0]]
     prev_z2 = z2_full[:, :sorted_dims[0]]
     prev_S = compute_cross_view_similarity_matrix(prev_z1, prev_z2)  # (B, B)
-    prev_prob = temperature_softmax(prev_S.flatten())                 # (B²,)
+    prev_prob = temperature_softmax(prev_S.flatten(), tau=tau)        # (B²,)
 
     for i in range(1, len(sorted_dims)):
         dim = sorted_dims[i]
         curr_z1 = z1_full[:, :dim]
         curr_z2 = z2_full[:, :dim]
         curr_S = compute_cross_view_similarity_matrix(curr_z1, curr_z2)  # (B, B)
-        curr_prob = temperature_softmax(curr_S.flatten())                # (B²,)
+        curr_prob = temperature_softmax(curr_S.flatten(), tau=tau)       # (B²,)
 
         # 对称 KL：prev_prob vs curr_prob
         loss_pair = symmetric_kl_divergence(prev_prob, curr_prob)
@@ -177,7 +173,7 @@ def compute_mutual_learning_loss_v4(
 # ============================================================================
 
 class MutualLearningLoss:
-    r"""互学习损失计算器（v4 — 全 B×B 矩阵余弦相似度 + 对称 KL 散度，ReLU 激活）。
+    r"""互学习损失计算器（v4 — 全 B×B 矩阵 + temperature-softmax + 对称 KL）。
 
     提供面向对象的接口，便于在 GRACE+MRL+ML 等方法中复用。
 
@@ -195,6 +191,7 @@ class MutualLearningLoss:
         self,
         mrl_dims: Sequence[int],
         ml_weight: float = 1.0,
+        tau: float = 0.5,
     ):
         """
         参数:
@@ -203,6 +200,7 @@ class MutualLearningLoss:
         """
         self.mrl_dims = sorted({int(d) for d in mrl_dims})
         self.ml_weight = ml_weight
+        self.tau = float(tau)
 
         if len(self.mrl_dims) < 2:
             import warnings
@@ -226,4 +224,5 @@ class MutualLearningLoss:
             z2_full=z2_full,
             mrl_dims=self.mrl_dims,
             ml_weight=self.ml_weight,
+            tau=self.tau,
         )

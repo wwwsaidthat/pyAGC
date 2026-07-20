@@ -54,19 +54,18 @@ def compute_cross_view_similarity_matrix(z1: Tensor, z2: Tensor, eps: float = 1e
     return S
 
 
-def temperature_softmax(logits: Tensor) -> Tensor:
-    r"""将 logits 转化为非负值（ReLU），保留正相似度、抑制负相似度。
-
-    prob = ReLU(logits)
+def temperature_softmax(logits: Tensor, tau: float = 0.5) -> Tensor:
+    r"""用温度缩放 softmax 将 logits 转成合法概率分布。
 
     参数:
         logits: 任意形状的 Tensor
 
     返回:
-        prob: 非负值，与 logits 同形状
+        prob: 和为 1 的概率分布，与 logits 同形状
     """
-    prob = F.relu(logits)
-    return prob
+    if tau <= 0:
+        raise ValueError(f"CDMD temperature 必须 > 0，当前为 {tau}")
+    return F.softmax(logits / tau, dim=-1)
 
 
 def symmetric_kl_divergence(p: Tensor, q: Tensor, eps: float = 1e-12) -> Tensor:
@@ -93,10 +92,7 @@ def symmetric_kl_divergence(p: Tensor, q: Tensor, eps: float = 1e-12) -> Tensor:
     # KL(q || p): p 作为目标 detach，梯度只流经 q
     kl_qp = (q * (q_clamp.log() - p_clamp.detach().log())).sum()
 
-    # 除以 B（batch size）做归一化，使 loss 与 batch size 无关
-    # p/q 是 B×B 矩阵拉平得到的 B² 维向量，B = sqrt(numel)
-    B = int(p.numel() ** 0.5)
-    loss = 0.5 * (kl_pq + kl_qp) / B
+    loss = 0.5 * (kl_pq + kl_qp)
     return loss
 
 
@@ -109,12 +105,13 @@ def compute_all_to_max_loss(
     z2_full: Tensor,
     mrl_dims: Sequence[int],
     ml_weight: float = 1.0,
+    tau: float = 0.5,
 ) -> Tensor:
-    r"""所有低维度向最高维度的 B×B 跨视图相似度矩阵学习（ReLU 激活）。
+    r"""所有低维度向最高维度的 B×B 跨视图相似度矩阵学习。
 
     对每个低维度 i（dim_i < max_dim）：
     1. 切片 z[:, :dim_i]，计算 B×B 跨视图相似度矩阵
-    2. 拉平 → ReLU → B² 维非负值
+    2. 拉平 → temperature-softmax → B² 维概率分布
     3. 与最大维度的目标分布做对称 KL 散度
 
     总损失 = ml_weight × 均值(所有低维度与最大维度的对称 KL)
@@ -138,7 +135,7 @@ def compute_all_to_max_loss(
     z1_max = z1_full[:, :max_dim]
     z2_max = z2_full[:, :max_dim]
     S_max = compute_cross_view_similarity_matrix(z1_max, z2_max)  # (B, B)
-    target_prob = temperature_softmax(S_max.flatten())             # (B²,)
+    target_prob = temperature_softmax(S_max.flatten(), tau=tau)    # (B²,)
 
     # 每个低维度与最高维度做对称 KL
     ml_sum = torch.zeros((), device=z1_full.device)
@@ -148,7 +145,7 @@ def compute_all_to_max_loss(
         z1_i = z1_full[:, :dim]
         z2_i = z2_full[:, :dim]
         S_i = compute_cross_view_similarity_matrix(z1_i, z2_i)  # (B, B)
-        curr_prob = temperature_softmax(S_i.flatten())           # (B²,)
+        curr_prob = temperature_softmax(S_i.flatten(), tau=tau)  # (B²,)
 
         # 对称 KL：低维度分布 vs 最高维度目标分布
         loss_pair = symmetric_kl_divergence(curr_prob, target_prob)
@@ -164,7 +161,7 @@ def compute_all_to_max_loss(
 # ============================================================================
 
 class MutualLearningLoss2:
-    r"""互学习损失计算器 v2（所有维度向最高维度学习，ReLU 激活）。
+    r"""互学习损失计算器 v2（所有维度向最高维度学习）。
 
     与 v4 的区别：
         - v4：相邻维度对 (i-1, i) 互学习
@@ -186,6 +183,7 @@ class MutualLearningLoss2:
         self,
         mrl_dims: Sequence[int],
         ml_weight: float = 1.0,
+        tau: float = 0.5,
     ):
         """
         参数:
@@ -194,6 +192,7 @@ class MutualLearningLoss2:
         """
         self.mrl_dims = sorted({int(d) for d in mrl_dims})
         self.ml_weight = ml_weight
+        self.tau = float(tau)
 
         if len(self.mrl_dims) < 2:
             import warnings
@@ -217,4 +216,5 @@ class MutualLearningLoss2:
             z2_full=z2_full,
             mrl_dims=self.mrl_dims,
             ml_weight=self.ml_weight,
+            tau=self.tau,
         )

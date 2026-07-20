@@ -1,0 +1,67 @@
+# Node-level large-graph adaptation of GraphCL (NeurIPS 2020).
+# Official repository: https://github.com/Shen-Lab/GraphCL
+#
+# Methods:
+#   graphcl       - GIN + GraphCL augmentations + original contrastive denominator
+#   graphcl_mrl   - one 768-d model, prefix dimensions trained jointly
+#   graphcl_csne  - GraphCL_MRL + CDMD + HPEM + DAS
+
+default:
+  num_layers: 2
+  hidden_dim: 768
+  proj_dim: 768
+  dropout: 0.0
+
+  graphcl_tau: 0.2
+  graphcl_aug_1: edge_perturb
+  graphcl_aug_2: attr_mask
+  graphcl_aug_ratio_1: 0.2
+  graphcl_aug_ratio_2: 0.2
+  graphcl_symmetric_loss: false
+
+  mrl_dims: 32,64,128,256,384,512,768
+  mrl_weight: 1.0
+  ml_weight: 1.0
+  ml_module: ml
+  cdmd_tau: 0.5
+  hpem_beta_init: 0.1
+  graphcl_hpem_tau_0: 0.2
+
+  pretrain_lr: 0.001
+  pretrain_weight_decay: 0.00001
+  pretrain_input: all
+  pretrain_early_stop: false
+
+  cls_epochs: 200
+  cls_lr: 0.01
+  cls_weight_decay: 0.0
+  cls_batch_size: 8192
+  cls_early_stop: true
+  cls_patience: 20
+
+  mode: neighbor
+  gpu_id: auto
+  infer_device: auto
+  log_level: INFO
+
+arxiv:
+  pretrain_epochs: 200
+  batch_size: 1024
+  eval_batch_size: 2048
+  num_neighbors: [15, 10]
+  eval_num_neighbors: [20, 10]
+
+products:
+  pretrain_epochs: 20
+  batch_size: 1024
+  eval_batch_size: 2048
+  num_neighbors: [10, 5]
+  eval_num_neighbors: [20, 10]
+
+mag:
+  pretrain_epochs: 50
+  batch_size: 1024
+  eval_batch_size: 2048
+  num_neighbors: [10, 5]
+  eval_num_neighbors: [20, 10]
+

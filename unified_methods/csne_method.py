@@ -14,7 +14,6 @@
         L_CSNE = Σ_{i>1} L_CDMD^{i-1,i} + Σ_i exp(λ·d_i/d_n) · L_HPEM^i
 """
 
-import itertools
 from typing import Dict, Sequence, Tuple
 
 import torch
@@ -48,9 +47,15 @@ class CSNEMethod(GRACEWithMRLMethod):
         # CDMD
         ml_weight: float = 1.0,
         ml_module: str = "ml",
+        cdmd_tau: float = 0.5,
         # HPEM
         hpem_beta_init: float = 0.1,
         hpem_tau_0: float = 0.5,
+        # 消融开关
+        use_cdmd: bool = True,
+        use_hpem: bool = True,
+        use_das: bool = True,
+        ablation_name: str = "csne",
         # DAS
         # （无额外参数，λ 自动初始化为 0）
         # 训练阶段
@@ -60,7 +65,11 @@ class CSNEMethod(GRACEWithMRLMethod):
         **kwargs,
     ) -> None:
         super().__init__(*args, mrl_dims=mrl_dims, mrl_weight=mrl_weight, **kwargs)
-        self.method_name = "csne"
+        self.method_name = str(ablation_name)
+        self.use_cdmd = bool(use_cdmd)
+        self.use_hpem = bool(use_hpem)
+        # DAS 只调度 HPEM；关闭 HPEM 时 DAS 在数学上没有消费者。
+        self.use_das = bool(use_das) and self.use_hpem
 
         # ---- 训练阶段配置 ----
         self.warmup_epochs = int(warmup_epochs)
@@ -77,11 +86,13 @@ class CSNEMethod(GRACEWithMRLMethod):
             self.cdmd = MutualLearningLoss2(
                 mrl_dims=self.mrl_dims,
                 ml_weight=ml_weight,
+                tau=cdmd_tau,
             )
         else:
             self.cdmd = MutualLearningLoss(
                 mrl_dims=self.mrl_dims,
                 ml_weight=ml_weight,
+                tau=cdmd_tau,
             )
 
         # ---- HPEM 模块（内置维度自适应 temperature τ_i）----
@@ -137,69 +148,76 @@ class CSNEMethod(GRACEWithMRLMethod):
             dim_losses["mrl_loss"] = float(total.detach().item())
             dim_losses["cdmd_loss"] = 0.0
             dim_losses["hpem_loss"] = 0.0
+            dim_losses["grace_mrl_loss"] = float(total.detach().item())
+            dim_losses["cdmd_enabled"] = float(self.use_cdmd)
+            dim_losses["hpem_enabled"] = float(self.use_hpem)
+            dim_losses["das_enabled"] = float(self.use_das)
             return total, dim_losses
 
         # ── 完整 CSNE 阶段 ──
         # ---- 1. CDMD 损失：相邻维度间的互蒸馏 ----
-        cdmd_loss = self.cdmd.compute(z1_full, z2_full)
+        if self.use_cdmd:
+            cdmd_loss = self.cdmd.compute(z1_full, z2_full)
+        else:
+            cdmd_loss = torch.zeros((), device=device)
 
         # ---- 2. HPEM 损失 + DAS 维度权重 ----
         hpem_total = torch.zeros((), device=device)
         hpem_detail: Dict[str, float] = {}
 
-        # i = 0（最小维度）：均匀权重 InfoNCE
-        dim_0 = sorted_dims[0]
-        tau_0 = self.hpem.get_tau(dim_0)
-        w_0 = self.das.get_hpem_weight(dim_0)
-        z1_0 = z1_full[:, :dim_0]
-        z2_0 = z2_full[:, :dim_0]
-        base_loss_0 = self.model.nt_xent(z1_0, z2_0, float(tau_0.item()))
-        hpem_total = hpem_total + w_0 * base_loss_0
-        hpem_detail[f"dim_{dim_0}"] = float(base_loss_0.detach().item())
+        if self.use_hpem:
+            # i = 0（最小维度）：均匀权重 InfoNCE
+            dim_0 = sorted_dims[0]
+            tau_0 = self.hpem.get_tau(dim_0)
+            w_0 = self.das.get_hpem_weight(dim_0) if self.use_das else torch.ones((), device=device)
+            z1_0 = z1_full[:, :dim_0]
+            z2_0 = z2_full[:, :dim_0]
+            base_loss_0 = self.model.nt_xent(z1_0, z2_0, tau_0)
+            hpem_total = hpem_total + w_0 * base_loss_0
+            hpem_detail[f"dim_{dim_0}"] = float(base_loss_0.detach().item())
 
-        # i > 0：confusion-based 加权的 HPEM（τ_i 由 HPEM 内部计算）
-        for i in range(1, len(sorted_dims)):
-            dim_prev = sorted_dims[i - 1]
-            dim_curr = sorted_dims[i]
-            w_i = self.das.get_hpem_weight(dim_curr)
+            # i > 0：confusion-based 加权的 HPEM（τ_i 由 HPEM 内部计算）
+            for i in range(1, len(sorted_dims)):
+                dim_prev = sorted_dims[i - 1]
+                dim_curr = sorted_dims[i]
+                w_i = self.das.get_hpem_weight(dim_curr) if self.use_das else torch.ones((), device=device)
 
-            hpem_i = self.hpem.compute_single(
-                z1_curr=z1_full[:, :dim_curr],
-                z2_curr=z2_full[:, :dim_curr],
-                z1_prev=z1_full[:, :dim_prev],
-                z2_prev=z2_full[:, :dim_prev],
-                dim_curr=dim_curr,  # HPEM 内部用此计算 τ_i
-            )
-            hpem_total = hpem_total + w_i * hpem_i
-            hpem_detail[f"dim_{dim_curr}"] = float(hpem_i.detach().item())
+                hpem_i = self.hpem.compute_single(
+                    z1_curr=z1_full[:, :dim_curr],
+                    z2_curr=z2_full[:, :dim_curr],
+                    z1_prev=z1_full[:, :dim_prev],
+                    z2_prev=z2_full[:, :dim_prev],
+                    dim_curr=dim_curr,
+                )
+                hpem_total = hpem_total + w_i * hpem_i
+                hpem_detail[f"dim_{dim_curr}"] = float(hpem_i.detach().item())
+        else:
+            # 去掉 HPEM 时必须保留标准 GRACE+MRL InfoNCE，否则只剩 CDMD
+            # 一致性项，缺少防坍塌的实例对比目标，消融将不再公平。
+            base_sum = torch.zeros((), device=device)
+            for dim in sorted_dims:
+                base_i = self.model.nt_xent(
+                    z1_full[:, :dim], z2_full[:, :dim], self.model.tau
+                )
+                base_sum = base_sum + base_i
+                hpem_detail[f"dim_{dim}"] = float(base_i.detach().item())
+            hpem_total = self.mrl_weight * base_sum / len(sorted_dims)
 
         # ---- 3. 总损失 ----
         total = cdmd_loss + hpem_total
 
         # ---- 记录日志 ----
         dim_losses["cdmd_loss"] = float(cdmd_loss.detach().item())
-        dim_losses["hpem_loss"] = float(hpem_total.detach().item())
+        dim_losses["hpem_loss"] = float(hpem_total.detach().item()) if self.use_hpem else 0.0
+        dim_losses["grace_mrl_loss"] = float(hpem_total.detach().item()) if not self.use_hpem else 0.0
         dim_losses["total_loss"] = float(total.detach().item())
+        dim_losses["cdmd_enabled"] = float(self.use_cdmd)
+        dim_losses["hpem_enabled"] = float(self.use_hpem)
+        dim_losses["das_enabled"] = float(self.use_das)
         dim_losses.update(hpem_detail)
-        dim_losses.update(self.hpem.log_info())
-        dim_losses.update(self.das.log_info())
+        if self.use_hpem:
+            dim_losses.update(self.hpem.log_info())
+        if self.use_das:
+            dim_losses.update(self.das.log_info())
 
         return total, dim_losses
-
-    # ------------------------------------------------------------------
-    # 参数管理
-    # ------------------------------------------------------------------
-
-    def parameters(self, recurse: bool = True):
-        """返回所有可训练参数的迭代器，包括 HPEM 和 DAS 的参数。"""
-        return itertools.chain(
-            super().parameters(recurse=recurse),
-            self.hpem.parameters(recurse=recurse),
-            self.das.parameters(recurse=recurse),
-        )
-
-    def named_parameters(self, prefix: str = '', recurse: bool = True):
-        """返回所有可训练参数的名称，包括 HPEM 和 DAS 的参数。"""
-        yield from super().named_parameters(prefix=prefix, recurse=recurse)
-        yield from self.hpem.named_parameters(prefix=prefix + 'hpem.', recurse=recurse)
-        yield from self.das.named_parameters(prefix=prefix + 'das.', recurse=recurse)

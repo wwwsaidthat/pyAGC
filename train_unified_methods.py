@@ -48,10 +48,19 @@ from unified_methods import (
     GAEMethod,
     GAEWithMRLMethod,
     LRGAEMethod,
-    BESMethod,
-    BESWithMRLMethod,
-    BESCSNEMethod,
+    GraphCLMethod,
+    GraphCLWithMRLMethod,
+    GraphCLCSNEMethod,
 )
+
+
+CSNE_METHODS = {"csne", "csne_no_cdmd", "csne_no_hpem", "csne_no_das"}
+GRAPHCL_METHODS = {"graphcl", "graphcl_mrl", "graphcl_csne"}
+
+
+def is_nested_method(method_name: str) -> bool:
+    """Return whether a method evaluates one embedding at several prefix dimensions."""
+    return "mrl" in method_name or "csne" in method_name
 
 
 # ============================================================================
@@ -306,9 +315,9 @@ def build_run_dirs(args: argparse.Namespace) -> tuple[Path, Path]:
     results_method_dir.mkdir(parents=True, exist_ok=True)
 
     tag = f"hd{int(args.hidden_dim)}_l{int(args.num_layers)}"
-    if args.method.startswith("grace"):
+    if args.method.startswith("grace") or args.method in CSNE_METHODS or args.method in GRAPHCL_METHODS:
         tag = f"{tag}_pd{int(args.proj_dim)}"
-    if "mrl" in args.method or args.method == "bes_csne":
+    if is_nested_method(args.method):
         tag = f"{tag}_mrl{max(parse_dims(args.mrl_dims))}"
     run_name = f"{stable_run_id(args)}_{tag}"
 
@@ -665,9 +674,20 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             grace_only_epochs=args.grace_only_epochs,
             grace_ml_epochs=args.grace_ml_epochs,
             ml_module=args.ml_module,
+            cdmd_tau=args.cdmd_tau,
             verbose=True,  # 默认开启 verbose 模式打印损失
         )
-    if args.method == "csne":
+    if args.method in CSNE_METHODS:
+        use_cdmd = bool(args.use_cdmd) and args.method != "csne_no_cdmd"
+        use_hpem = bool(args.use_hpem) and args.method != "csne_no_hpem"
+        use_das = bool(args.use_das) and args.method != "csne_no_das"
+        disabled = [
+            name
+            for name, enabled in (("cdmd", use_cdmd), ("hpem", use_hpem), ("das", use_das))
+            if not enabled
+        ]
+        expected_alias = "csne" if not disabled else "csne_no_" + "_no_".join(disabled)
+        ablation_name = args.method if args.method == expected_alias else expected_alias
         return CSNEMethod(
             in_dim=in_dim,
             hidden_dim=args.hidden_dim,
@@ -683,8 +703,13 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             mrl_weight=args.mrl_weight,
             ml_weight=args.ml_weight,
             ml_module=args.ml_module,
+            cdmd_tau=args.cdmd_tau,
             hpem_beta_init=args.hpem_beta_init,
             hpem_tau_0=args.hpem_tau_0,
+            use_cdmd=use_cdmd,
+            use_hpem=use_hpem,
+            use_das=use_das,
+            ablation_name=ablation_name,
             warmup_epochs=args.grace_only_epochs,
             full_epochs=args.grace_ml_epochs,
             verbose=True,
@@ -751,61 +776,38 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             grad_norm=args.lrgae_grad_norm,
             use_amp=args.amp,
         )
-    if args.method == "bes":
-        return BESMethod(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            tau=getattr(args, "bes_tau", 1.0),
-            delta=getattr(args, "bes_delta", 5.0),
-            alpha=getattr(args, "bes_alpha", 1.0),
-            num_classes=num_classes,
-            total_epochs=args.pretrain_epochs,
-            backbone_epochs=args.bes_backbone_epochs,
-            num_heads=args.bes_num_heads,
-            attention_layers=args.bes_attention_layers,
-            beta_size=args.bes_beta_size,
-            boundary_knn=args.bes_boundary_knn,
-            covariance_reg=args.bes_covariance_reg,
-            max_boundary_candidates=args.bes_max_boundary_candidates,
-            displacement_batch_size=args.bes_displacement_batch_size,
-        )
-    if args.method in ("bes_mrl", "bes_csne"):
+    if args.method in GRAPHCL_METHODS:
         common = dict(
             in_dim=in_dim,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             dropout=args.dropout,
-            tau=args.bes_tau,
-            delta=args.bes_delta,
-            alpha=args.bes_alpha,
-            num_classes=num_classes,
-            total_epochs=args.pretrain_epochs,
-            backbone_epochs=args.bes_backbone_epochs,
-            num_heads=args.bes_num_heads,
-            attention_layers=args.bes_attention_layers,
-            beta_size=args.bes_beta_size,
-            boundary_knn=args.bes_boundary_knn,
-            covariance_reg=args.bes_covariance_reg,
-            max_boundary_candidates=args.bes_max_boundary_candidates,
-            displacement_batch_size=args.bes_displacement_batch_size,
+            proj_dim=args.proj_dim,
+            tau=args.graphcl_tau,
+            aug_1=args.graphcl_aug_1,
+            aug_2=args.graphcl_aug_2,
+            aug_ratio_1=args.graphcl_aug_ratio_1,
+            aug_ratio_2=args.graphcl_aug_ratio_2,
+            symmetric_loss=args.graphcl_symmetric_loss,
+        )
+        if args.method == "graphcl":
+            return GraphCLMethod(**common)
+        nested = dict(
+            **common,
             mrl_dims=mrl_dims,
             mrl_weight=args.mrl_weight,
         )
-        if args.method == "bes_mrl":
-            return BESWithMRLMethod(**common)
-        return BESCSNEMethod(
-            **common,
-            csne_weight=args.bes_csne_weight,
+        if args.method == "graphcl_mrl":
+            return GraphCLWithMRLMethod(**nested)
+        return GraphCLCSNEMethod(
+            **nested,
             ml_weight=args.ml_weight,
             ml_module=args.ml_module,
+            cdmd_tau=args.cdmd_tau,
             hpem_beta_init=args.hpem_beta_init,
-            hpem_tau_0=args.hpem_tau_0,
-            csne_warmup_epochs=args.bes_csne_warmup_epochs,
-            csne_batch_size=args.bes_csne_batch_size,
-            view_mask_1=args.p_feat_mask_1,
-            view_mask_2=args.p_feat_mask_2,
+            hpem_tau_0=args.graphcl_hpem_tau_0,
+            warmup_epochs=args.grace_only_epochs,
+            full_epochs=args.grace_ml_epochs,
         )
     raise ValueError(f"未知方法: {args.method}")
 
@@ -1028,14 +1030,9 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
         if hasattr(method, 'manages_own_optimizer') and method.manages_own_optimizer:
             optimizer = None  # Will be ignored; method handles optimization internally
         else:
-            initial_pretrain_lr = (
-                float(args.bes_backbone_lr)
-                if args.method.startswith("bes")
-                else float(args.pretrain_lr)
-            )
             optimizer = torch.optim.Adam(
                 method.parameters(),
-                lr=initial_pretrain_lr,
+                lr=float(args.pretrain_lr),
                 weight_decay=args.pretrain_weight_decay,
             )
         best_ssl = float("inf")
@@ -1043,26 +1040,14 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
         best_ssl_state: Optional[Dict[str, Tensor]] = None
         ssl_stop_epoch = 0
         ssl_patience_left = int(args.pretrain_patience)
-        # BES has ordered backbone/attention stages; loss values across stages
-        # are not comparable and stopping early would leave later layers untrained.
-        effective_ssl_early_stop = bool(args.pretrain_early_stop) and not args.method.startswith("bes")
+        effective_ssl_early_stop = bool(args.pretrain_early_stop)
         for ep in range(1, args.pretrain_epochs + 1):
             # 更新 epoch（用于 verbose 模式打印）
             if hasattr(method, "epoch"):
                 method.epoch = ep
 
-            if (args.method.startswith("bes")
-                    and ep == args.bes_backbone_epochs + 1):
-                for pg in optimizer.param_groups:
-                    pg["lr"] = float(args.pretrain_lr)
-                logger.info(
-                    "BES shaping 阶段开始 | backbone 已冻结 | lr 切换: %.6f -> %.6f",
-                    float(args.bes_backbone_lr),
-                    float(args.pretrain_lr),
-                )
-
             # grace_ML / CSNE 两阶段：进入第二阶段时切换学习率
-            if (args.method in ("grace_ml", "csne")
+            if ((args.method == "grace_ml" or args.method in CSNE_METHODS or args.method == "graphcl_csne")
                     and args.grace_ml_lr is not None
                     and ep == args.grace_only_epochs + 1):
                 for pg in optimizer.param_groups:
@@ -1276,7 +1261,7 @@ def evaluate_once(
         "test_metrics": test_metrics,
         "checkpoint_path": str(checkpoint_path),
     }
-    if "mrl" in args.method or args.method == "bes_csne":
+    if is_nested_method(args.method):
         result["mrl_dims"] = parse_dims(args.mrl_dims)
     if mrl_dim_test_accuracy:
         result["mrl_dim_test_accuracy"] = mrl_dim_test_accuracy
@@ -1387,7 +1372,7 @@ def save_results(
         "mean_pm_variance": f"{stats['mean']:.4f} ± {stats['variance']:.6f}",
         "per_eval_results": eval_results,
     }
-    if "mrl" in args.method or args.method == "bes_csne":
+    if is_nested_method(args.method):
         summary["mrl_dims"] = parse_dims(args.mrl_dims)
     if mrl_dim_accuracy_stats:
         summary["mrl_dim_accuracy_stats"] = mrl_dim_accuracy_stats
@@ -1471,14 +1456,17 @@ def parse_args() -> argparse.Namespace:
             "grace_mrl",
             "grace_ml",
             "csne",
+            "csne_no_cdmd",
+            "csne_no_hpem",
+            "csne_no_das",
             "ssge",
             "ssge_mrl",
             "gae",
             "gae_mrl",
             "lrgae",
-            "bes",
-            "bes_mrl",
-            "bes_csne",
+            "graphcl",
+            "graphcl_mrl",
+            "graphcl_csne",
         ],
     )
     p.add_argument("--dataset", type=str, required=True, choices=["arxiv", "reddit2", "products", "mag"])
@@ -1494,7 +1482,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-dims", type=str, default=None,
                    help="依次独立训练多个维度，例如 32,64,128,256,384,512,768")
     p.add_argument("--dropout", type=float, default=0.5)
-    p.add_argument("--proj-dim", type=int, default=256, help="GRACE 投影维度")
+    p.add_argument("--proj-dim", type=int, default=256, help="GRACE/GraphCL 投影维度")
     p.add_argument("--tau", type=float, default=0.5, help="GRACE 温度系数")
     p.add_argument("--lam", type=float, default=1e-3, help="CCA-SSG λ")
 
@@ -1548,6 +1536,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ml-weight", type=float, default=5.0, help="互学习损失权重")
     p.add_argument("--ml-module", type=str, default="ml", choices=["ml", "ml2"],
                    help="互学习模块版本: ml=相邻维度互学习, ml2=所有维度向最高维学习")
+    p.add_argument("--cdmd-tau", type=float, default=0.5,
+                   help="CDMD 相似度分布的 softmax 温度，必须 > 0")
+    p.add_argument("--disable-cdmd", dest="use_cdmd", action="store_false", default=True,
+                   help="关闭 CDMD；可与其他消融开关组合")
+    p.add_argument("--disable-hpem", dest="use_hpem", action="store_false", default=True,
+                   help="关闭 HPEM；此时自动以标准 GRACE+MRL InfoNCE 替代")
+    p.add_argument("--disable-das", dest="use_das", action="store_false", default=True,
+                   help="关闭 DAS；HPEM 各维损失改为等权")
     p.add_argument("--hpem-beta-init", type=float, default=0.1,
                    help="HPEM 的 β 参数初始值（可学习）")
     p.add_argument("--hpem-tau-0", type=float, default=0.5,
@@ -1559,37 +1555,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--svd-dims", type=str, default=None,
                    help="SVD基线：逗号分隔的目标维度，例如 32,64,128。使用TruncatedSVD（不去中心化）降维并评估每维度5次")
 
-    # ---- BES 特有参数 ----
-    p.add_argument("--bes-tau", type=float, default=1.0,
-                   help="BES 排斥损失温度系数")
-    p.add_argument("--bes-delta", type=float, default=5.0,
-                   help="BES Mahalanobis 边界检测阈值")
-    p.add_argument("--bes-alpha", type=float, default=1.0,
-                   help="BES virtual step 缩放因子")
-    p.add_argument("--bes-backbone-epochs", type=int, default=None,
-                   help="双视角 GNN 监督预训练轮数；默认 pretrain-epochs 的一半")
-    p.add_argument("--bes-backbone-lr", type=float, default=0.005,
-                   help="双视角 GNN 监督预训练学习率；shaping 阶段切回 pretrain-lr")
-    p.add_argument("--bes-num-heads", type=int, default=2,
-                   help="Boundary attention 的头数")
-    p.add_argument("--bes-attention-layers", type=int, default=2,
-                   help="顺序训练的 boundary attention 层数")
-    p.add_argument("--bes-beta-size", type=int, default=256,
-                   help="每次 gravity update 采样的边界节点数")
-    p.add_argument("--bes-boundary-knn", type=int, default=5,
-                   help="边界 shift score 使用的 embedding kNN 数")
-    p.add_argument("--bes-covariance-reg", type=float, default=1e-4,
-                   help="全局协方差矩阵的对角正则项")
-    p.add_argument("--bes-max-boundary-candidates", type=int, default=0,
-                   help="边界候选上限；0 为论文式全量，超大图可设 50000")
-    p.add_argument("--bes-displacement-batch-size", type=int, default=4096,
-                   help="全局 virtual displacement 的分块大小")
-    p.add_argument("--bes-csne-weight", type=float, default=1.0,
-                   help="实验性 BES_CSNE 损失权重")
-    p.add_argument("--bes-csne-warmup-epochs", type=int, default=25,
-                   help="BES shaping 阶段内 CSNE warmup 轮数")
-    p.add_argument("--bes-csne-batch-size", type=int, default=1024,
-                   help="BES_CSNE 对比损失节点采样数")
+    # ---- GraphCL 特有参数 ----
+    graphcl_aug_choices = sorted(["none", "node_drop", "edge_perturb", "subgraph", "attr_mask", "random"])
+    p.add_argument("--graphcl-tau", type=float, default=0.2,
+                   help="GraphCL InfoNCE 温度；原仓库默认 0.2")
+    p.add_argument("--graphcl-aug-1", type=str, default="edge_perturb", choices=graphcl_aug_choices,
+                   help="GraphCL 第一视图增强")
+    p.add_argument("--graphcl-aug-2", type=str, default="attr_mask", choices=graphcl_aug_choices,
+                   help="GraphCL 第二视图增强")
+    p.add_argument("--graphcl-aug-ratio-1", type=float, default=0.2,
+                   help="第一视图增强强度，范围 [0,1)")
+    p.add_argument("--graphcl-aug-ratio-2", type=float, default=0.2,
+                   help="第二视图增强强度，范围 [0,1)")
+    p.add_argument("--graphcl-symmetric-loss", action="store_true", default=False,
+                   help="使用双向 GraphCL 损失；默认关闭以贴近原仓库 loss_cal")
+    p.add_argument("--graphcl-hpem-tau-0", type=float, default=0.2,
+                   help="GraphCL_CSNE 的 HPEM 基础温度")
 
     # ---- LRGAE 特有参数 ----
     p.add_argument("--lrgae-variant", type=int, default=8, choices=[5, 6, 7, 8],
@@ -1690,12 +1671,9 @@ def main() -> None:
             args.grace_only_epochs = goe
             args.grace_ml_epochs = gme
             args.pretrain_epochs = goe + gme
-        elif args.method in ("grace_ml", "csne"):
+        elif args.method == "grace_ml" or args.method in CSNE_METHODS or args.method == "graphcl_csne":
             args.grace_only_epochs = args.pretrain_epochs // 2
             args.grace_ml_epochs = args.pretrain_epochs - args.grace_only_epochs
-
-        if args.bes_backbone_epochs is None:
-            args.bes_backbone_epochs = args.pretrain_epochs // 2
 
         enable_torch26_compat()
         bundle = load_dataset(
@@ -1900,7 +1878,7 @@ def main() -> None:
                     "test_metrics": test_metrics,
                     "checkpoint_path": str(checkpoint_path),
                 }
-                if "mrl" in args.method or args.method == "bes_csne":
+                if is_nested_method(args.method):
                     result["mrl_dims"] = parse_dims(args.mrl_dims)
                 if mrl_dim_test_accuracy:
                     result["mrl_dim_test_accuracy"] = mrl_dim_test_accuracy

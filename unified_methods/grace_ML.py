@@ -72,6 +72,7 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         grace_only_epochs: int = 100,
         grace_ml_epochs: int = 100,
         ml_module: str = "ml",
+        cdmd_tau: float = 0.5,
         verbose: bool = False,
         **kwargs,
     ) -> None:
@@ -88,11 +89,13 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
             self.ml_calculator = MutualLearningLoss2(
                 mrl_dims=self.mrl_dims,
                 ml_weight=ml_weight,
+                tau=cdmd_tau,
             )
         else:
             self.ml_calculator = MutualLearningLoss(
                 mrl_dims=self.mrl_dims,
                 ml_weight=ml_weight,
+                tau=cdmd_tau,
             )
         self.epoch = 0
 
