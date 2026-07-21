@@ -64,4 +64,3 @@ mag:
   eval_batch_size: 2048
   num_neighbors: [10, 5]
   eval_num_neighbors: [20, 10]
-
