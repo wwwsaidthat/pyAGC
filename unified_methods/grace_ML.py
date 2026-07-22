@@ -16,18 +16,16 @@ L_total = mrl_weight × (1/|M|) × Σ L_GRACE^i
 
 互学习损失（v4 — 全 B×B 跨视图相似度矩阵）：
 Step 1 — 计算两个视图归一化嵌入的 B×B 相似度矩阵：
-    S_i = z1_norm[:, :i] @ z2_norm[:, :i].T       →  (B, B)
+    S_i = h1_norm[:, :i] @ h2_norm[:, :i].T       →  (B, B)
 
-Step 2 — 拉平 + 温度缩放 + softmax：
-    S̃_i = softmax(flatten(S_i) / τ_ml)             →  (B²,)
+Step 2 — 拉平 + ReLU：
+    r_i = ReLU(flatten(S_i))                       →  (B²,)
 
-Step 3 — 对称 KL 散度：
-    L_ML^{i-1,i} = ½ [KL(S̃_{i-1} || S̃_i) + KL(S̃_i || S̃_{i-1})]
+Step 3 — 双向相对熵按样本数归一化：
+    L_ML^{i-1,i} = (1/2B) [D(r_{i-1} || r_i) + D(r_i || r_{i-1})]
 
-与 v3（仅正样本对）的核心区别：
-    - v3 只取对角（B 个正样本对），softmax 后 B 维分布 → KL
-    - v4 取完整 B×B 矩阵（含所有正样本+负样本对），softmax 后 B² 维分布 → KL
-    - v4 衡量的不只是正样本对排序，而是整个跨视图相似度矩阵结构的一致性
+与仅使用正样本对的版本不同，当前实现取完整 B×B 相似度矩阵，经
+ReLU 得到非负关系证据，并对齐整个跨视图关系结构。
 
 GRACE 损失计算与父类 GRACEWithMRLMethod 完全一致，
 均通过 self.model.nt_xent 调用，保证 ml_weight=0 时严格等价。
@@ -71,7 +69,7 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         ml_weight: float = 1.0,
         grace_only_epochs: int = 100,
         grace_ml_epochs: int = 100,
-        ml_module: str = "ml",
+        ml_module: str = "ml2",
         cdmd_tau: float = 0.5,
         verbose: bool = False,
         **kwargs,
@@ -105,8 +103,8 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
 
     def _grace_prefix_loss_with_details(
         self,
-        z1_full: Tensor,
-        z2_full: Tensor,
+        h1_full: Tensor,
+        h2_full: Tensor,
     ) -> Tuple[Tensor, Dict[str, float]]:
         """计算各维度 GRACE 损失 + 互学习损失（v4：全 B×B 矩阵，两阶段训练）。
 
@@ -118,26 +116,26 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         - 第二阶段（epoch > grace_only_epochs）：加入互学习损失
 
         互学习损失部分（v4）：
-        直接传入完整投影器输出，由 MutualLearningLoss.compute()
-        内部处理：切片 → B×B 矩阵 → flatten → softmax → 对称 KL
+        直接传入完整编码器输出，由 MutualLearningLoss.compute()
+        内部处理：切片 → B×B 矩阵 → flatten → ReLU → 双向相对熵 / B
 
         参数:
-            z1_full: 第一视图的投影 embedding，形状 (B, proj_dim)
-            z2_full: 第二视图的投影 embedding，形状 (B, proj_dim)
+            h1_full: 第一视图的编码器输出，形状 (B, hidden_dim)
+            h2_full: 第二视图的编码器输出，形状 (B, hidden_dim)
 
         返回:
             total: 总损失标量
             dim_losses: 各分量损失字典
         """
         dim_losses: Dict[str, float] = {}
-        loss_sum = torch.zeros((), device=z1_full.device)
+        loss_sum = torch.zeros((), device=h1_full.device)
 
         for dim in self.mrl_dims:
-            z1 = z1_full[:, :dim]
-            z2 = z2_full[:, :dim]
+            h1 = h1_full[:, :dim]
+            h2 = h2_full[:, :dim]
 
             # GRACE 损失：与父类完全一致的调用方式
-            dim_loss = self.model.nt_xent(z1, z2, self.model.tau)
+            dim_loss = self.model.nt_xent(h1, h2, self.model.tau)
             loss_sum = loss_sum + dim_loss
             dim_losses[f"dim_{dim}"] = float(dim_loss.detach().item())
 
@@ -147,9 +145,9 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
 
         # 第一阶段只训练 GRACE（无互学习损失），第二阶段再加入互学习损失
         if self.epoch > self.grace_only_epochs and self.ml_weight > 0.0:
-            ml_loss = self.ml_calculator.compute(z1_full, z2_full)
+            ml_loss = self.ml_calculator.compute(h1_full, h2_full)
         else:
-            ml_loss = torch.zeros((), device=z1_full.device)
+            ml_loss = torch.zeros((), device=h1_full.device)
 
         # 总损失
         total = mrl_loss + ml_loss

@@ -62,12 +62,14 @@ PyAGC 是一个基于 **PyTorch** 与 **PyTorch Geometric** 的属性图聚类�
 - `dgi` - Deep Graph Infomax
 - `ccassg` - CCA-SSG
 - `grace` - GRACE
-- `dgi_mrl` - DGI + MRL
-- `ccassg_mrl` - CCA-SSG + MRL
 - `grace_mrl` - GRACE + MRL
+- `grace_ml` - GRACE + MRL + cross-dimensional mutual learning
+- `mcne` - GRACE + MRL + CDMD + HPEM + DALS
 - `graphcl` - GraphCL 的大图节点级 NeighborLoader 适配
-- `graphcl_mrl` - GraphCL + MRL
-- `graphcl_csne` - GraphCL + MRL + CDMD + HPEM + DAS
+- `pagcl` - KDD 2025 PaGCL 渐进增强与时空不变性学习的大图节点级适配
+- `pagcl_mrl` - PaGCL + MRL
+- `pagcl_mcne` - PaGCL + MRL，并在相邻渐进视图上加入 MCNE
+- `ssge` - SSGE
 
 脚本特性：
 - 自动选择 `full` 或 `neighbor` 训练/推理模式
@@ -96,7 +98,7 @@ pyAGC/
 ├── dgi.yaml                    # DGI 实验配置
 ├── ccassg.yaml                 # CCA-SSG 实验配置
 ├── grace.yaml                  # GRACE 实验配置
-├── graphcl.yaml                # GraphCL / GraphCL-MRL / GraphCL-CSNE 实验配置
+├── graphcl.yaml                # GraphCL 实验配置
 └── .gitignore                  # Git 忽略规则
 ```
 

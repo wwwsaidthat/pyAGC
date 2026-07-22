@@ -1,4 +1,4 @@
-"""互学习损失计算模块 v2（全矩阵余弦相似度 + 对称 KL 散度 — 所有维度向最高维学习）。
+"""CDMD：所有低维前缀向最高维前缀学习。
 
 与 ML_module (v4) 的核心区别：
     - v4：相邻维度对 (i-1, i) 互相学习，鼓励相邻子空间产生一致的相似度结构
@@ -12,17 +12,18 @@ Step 1 — 计算最高维度的完整 B×B 相似度矩阵（作为目标分布
 Step 2 — 对每个低维度 i（i < max_dim）：
     S_i = z1_norm[:, :dim_i] @ z2_norm[:, :dim_i].T              →  (B, B)
 
-Step 3 — 拉平 + 温度缩放 + softmax：
-    S̃_i = softmax(flatten(S_i) / τ_ml)                           →  (B²,)
-    S̃_max = softmax(flatten(S_max) / τ_ml)                       →  (B²,)
+Step 3 — 拉平 + ReLU：
+    r_i = ReLU(flatten(S_i))                                      →  (B²,)
+    r_max = ReLU(flatten(S_max))                                  →  (B²,)
 
-Step 4 — 对称 KL 散度：
-    L_i = ½ [KL(S̃_i || S̃_max) + KL(S̃_max || S̃_i)]
+Step 4 — 按样本数归一化的双向相对熵：
+    L_i = (1/2B) [D(r_i || r_max) + D(r_max || r_i)]
 
 Step 5 — 总互学习损失：
     L_ML = ml_weight × (1/(|M|-1)) × Σ_{dim_i < max_dim} L_i
 """
 
+import math
 from typing import Sequence
 
 import torch
@@ -31,7 +32,7 @@ from torch import Tensor
 
 
 # ============================================================================
-# 复用 ML_module 的基础组件（compute_cross_view_similarity_matrix / temperature_softmax / symmetric_kl_divergence）
+# 与相邻维度版本保持相同的相似度、ReLU 证据和双向相对熵定义。
 # ============================================================================
 
 def compute_cross_view_similarity_matrix(z1: Tensor, z2: Tensor, eps: float = 1e-8) -> Tensor:
@@ -54,35 +55,40 @@ def compute_cross_view_similarity_matrix(z1: Tensor, z2: Tensor, eps: float = 1e
     return S
 
 
-def temperature_softmax(logits: Tensor, tau: float = 0.5) -> Tensor:
-    r"""用温度缩放 softmax 将 logits 转成合法概率分布。
+def positive_similarity_evidence(logits: Tensor, tau: float = 0.5) -> Tensor:
+    r"""用 ReLU 保留正相似度并抑制负相似度。
+
+    ``tau`` 仅为旧 checkpoint/命令兼容而保留，不参与计算。
 
     参数:
         logits: 任意形状的 Tensor
 
     返回:
-        prob: 和为 1 的概率分布，与 logits 同形状
+        非负关系证据，与 logits 同形状
     """
-    if tau <= 0:
-        raise ValueError(f"CDMD temperature 必须 > 0，当前为 {tau}")
-    return F.softmax(logits / tau, dim=-1)
+    del tau
+    return F.relu(logits)
+
+
+# Backward-compatible alias for old imports/checkpoints.
+temperature_softmax = positive_similarity_evidence
 
 
 def symmetric_kl_divergence(p: Tensor, q: Tensor, eps: float = 1e-12) -> Tensor:
-    r"""计算两个概率分布之间的对称 KL 散度（目标分布 detach）。
+    r"""计算非负关系证据之间的双向相对熵（目标侧 detach）。
 
-    L = ½ [KL(p || q) + KL(q || p)]
+    L = (1/2B) [D(p || q) + D(q || p)]
 
     关键设计：每个 KL 方向中，作为"目标"的分布会被 detach，
     梯度只流经"学生"一侧，避免两边同时更新导致训练不稳定。
 
     参数:
-        p: 第一个概率分布，任意形状；要求 sum(p) ≈ 1
-        q: 第二个概率分布，任意形状；要求 sum(q) ≈ 1
-        eps: 数值稳定项，对概率做 clamp 防止 log(0)
+        p: 第一组非负关系证据，形状 (B²,)
+        q: 第二组非负关系证据，形状 (B²,)
+        eps: 数值稳定项，对关系证据做 clamp 防止 log(0)
 
     返回:
-        loss: 对称 KL 散度标量
+        loss: 按样本数归一化的双向相对熵
     """
     p_clamp = p.clamp(min=eps)
     q_clamp = q.clamp(min=eps)
@@ -92,7 +98,11 @@ def symmetric_kl_divergence(p: Tensor, q: Tensor, eps: float = 1e-12) -> Tensor:
     # KL(q || p): p 作为目标 detach，梯度只流经 q
     kl_qp = (q * (q_clamp.log() - p_clamp.detach().log())).sum()
 
-    loss = 0.5 * (kl_pq + kl_qp)
+    numel = int(p.numel())
+    batch_size = math.isqrt(numel)
+    if batch_size * batch_size != numel:
+        raise ValueError(f"CDMD 期望 B² 个关系元素，实际得到 {numel}")
+    loss = 0.5 * (kl_pq + kl_qp) / batch_size
     return loss
 
 
@@ -111,14 +121,14 @@ def compute_all_to_max_loss(
 
     对每个低维度 i（dim_i < max_dim）：
     1. 切片 z[:, :dim_i]，计算 B×B 跨视图相似度矩阵
-    2. 拉平 → temperature-softmax → B² 维概率分布
-    3. 与最大维度的目标分布做对称 KL 散度
+    2. 拉平 → ReLU → B² 维非负关系证据
+    3. 与最大维度的证据做双向相对熵并除以样本数 B
 
     总损失 = ml_weight × 均值(所有低维度与最大维度的对称 KL)
 
     参数:
-        z1_full: 第一视图的完整 embedding，形状 (B, proj_dim)
-        z2_full: 第二视图的完整 embedding，形状 (B, proj_dim)
+        z1_full: 第一视图的完整表示，形状 (B, hidden_dim)
+        z2_full: 第二视图的完整表示，形状 (B, hidden_dim)
         mrl_dims: MRL 维度列表，例如 [64, 128, 256, 512]
         ml_weight: 互学习损失权重
 
@@ -131,11 +141,11 @@ def compute_all_to_max_loss(
     sorted_dims = sorted(mrl_dims)
     max_dim = sorted_dims[-1]
 
-    # 计算最高维度的目标分布
+    # 计算最高维度的参考关系证据
     z1_max = z1_full[:, :max_dim]
     z2_max = z2_full[:, :max_dim]
     S_max = compute_cross_view_similarity_matrix(z1_max, z2_max)  # (B, B)
-    target_prob = temperature_softmax(S_max.flatten(), tau=tau)    # (B²,)
+    target_evidence = positive_similarity_evidence(S_max.flatten(), tau=tau)  # (B²,)
 
     # 每个低维度与最高维度做对称 KL
     ml_sum = torch.zeros((), device=z1_full.device)
@@ -145,10 +155,10 @@ def compute_all_to_max_loss(
         z1_i = z1_full[:, :dim]
         z2_i = z2_full[:, :dim]
         S_i = compute_cross_view_similarity_matrix(z1_i, z2_i)  # (B, B)
-        curr_prob = temperature_softmax(S_i.flatten(), tau=tau)  # (B²,)
+        curr_evidence = positive_similarity_evidence(S_i.flatten(), tau=tau)  # (B²,)
 
-        # 对称 KL：低维度分布 vs 最高维度目标分布
-        loss_pair = symmetric_kl_divergence(curr_prob, target_prob)
+        # 双向相对熵：低维关系证据 vs 最高维关系证据
+        loss_pair = symmetric_kl_divergence(curr_evidence, target_evidence)
         ml_sum = ml_sum + loss_pair
 
     # 取均值 × 权重
@@ -205,8 +215,8 @@ class MutualLearningLoss2:
         r"""从投影器输出计算互学习损失（v2 — 所有维度向最高维学习）。
 
         参数:
-            z1_full: 第一视图的投影 embedding，形状 (B, proj_dim)
-            z2_full: 第二视图的投影 embedding，形状 (B, proj_dim)
+            z1_full: 第一视图的编码器输出，形状 (B, hidden_dim)
+            z2_full: 第二视图的编码器输出，形状 (B, hidden_dim)
 
         返回:
             ml_loss: 互学习损失标量（已包含 ml_weight）

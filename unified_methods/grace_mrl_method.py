@@ -24,13 +24,6 @@ class GRACEWithMRLMethod(GRACEMethod):
         self.mrl_dims = dims
         self.mrl_weight = float(mrl_weight)
         max_dim = int(max(self.mrl_dims))
-        proj_out = None
-        if hasattr(self.model, "projector") and hasattr(self.model.projector, "__len__") and len(self.model.projector) > 0:
-            last = self.model.projector[-1]
-            if hasattr(last, "out_features"):
-                proj_out = int(last.out_features)
-        if proj_out is not None and proj_out < max_dim:
-            raise ValueError(f"GRACE+MRL 需要 --proj-dim >= max(mrl_dims)={max_dim}, 但当前 proj-dim={proj_out}")
         if self.hidden_dim < max_dim:
             raise ValueError(
                 f"GRACE+MRL 需要 --hidden-dim >= max(mrl_dims)={max_dim}, "
@@ -42,13 +35,13 @@ class GRACEWithMRLMethod(GRACEMethod):
     def output_dim(self) -> int:
         return self.hidden_dim
 
-    def _grace_prefix_loss_with_details(self, z1_full: Tensor, z2_full: Tensor) -> Tuple[Tensor, Dict[str, float]]:
+    def _grace_prefix_loss_with_details(self, h1_full: Tensor, h2_full: Tensor) -> Tuple[Tensor, Dict[str, float]]:
         dim_losses: Dict[str, float] = {}
-        loss_sum = torch.zeros((), device=z1_full.device)
+        loss_sum = torch.zeros((), device=h1_full.device)
         for dim in self.mrl_dims:
-            z1 = z1_full[:, :dim]
-            z2 = z2_full[:, :dim]
-            dim_loss = self.model.nt_xent(z1, z2, self.model.tau)
+            h1 = h1_full[:, :dim]
+            h2 = h2_full[:, :dim]
+            dim_loss = self.model.nt_xent(h1, h2, self.model.tau)
             loss_sum = loss_sum + dim_loss
             dim_losses[f"dim_{dim}"] = float(dim_loss.detach().item())
         total = self.mrl_weight * loss_sum / len(self.mrl_dims)
@@ -63,9 +56,7 @@ class GRACEWithMRLMethod(GRACEMethod):
         v2 = self.model.t2(x, e)
         h1 = self.model.embed(v1["x"], v1["edge_index"])
         h2 = self.model.embed(v2["x"], v2["edge_index"])
-        z1_full = self.model.projector(h1)
-        z2_full = self.model.projector(h2)
-        loss, dim_losses = self._grace_prefix_loss_with_details(z1_full, z2_full)
+        loss, dim_losses = self._grace_prefix_loss_with_details(h1, h2)
         loss.backward()
         optimizer.step()
         self.last_mrl_dim_losses = dim_losses
@@ -98,9 +89,7 @@ class GRACEWithMRLMethod(GRACEMethod):
             v2 = self.model.t2(batch.x, batch.edge_index)
             h1 = self.model.embed(v1["x"], v1["edge_index"])[: batch.batch_size]
             h2 = self.model.embed(v2["x"], v2["edge_index"])[: batch.batch_size]
-            z1_full = self.model.projector(h1)
-            z2_full = self.model.projector(h2)
-            loss, dim_losses = self._grace_prefix_loss_with_details(z1_full, z2_full)
+            loss, dim_losses = self._grace_prefix_loss_with_details(h1, h2)
             loss.backward()
             optimizer.step()
             total += float(loss.item()) * int(batch.batch_size)

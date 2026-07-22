@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""统一训练脚本：GCN监督、DGI/CCA-SSG/GRACE 及其 MRL 融合版本。"""
+"""统一训练脚本：GCN、DGI、CCA-SSG、SSGE、GRACE、GraphCL 与 PaGCL。"""
 
 import argparse
 import hashlib
@@ -35,32 +35,28 @@ from pyagc.data import get_dataset
 from unified_methods import (
     BaseMethod,
     CCASSGMethod,
-    CCASSGWithMRLMethod,
-    CSNEMethod,
+    MCNEMethod,
     DGIMethod,
-    DGIWithMRLMethod,
     GRACEMethod,
     GRACEWithMRLMethod,
     GRACEWithMRLMutualLearningMethod,
     SSGEMethod,
-    SSGEWithMRLMethod,
     SupervisedGCNMethod,
-    GAEMethod,
-    GAEWithMRLMethod,
-    LRGAEMethod,
     GraphCLMethod,
-    GraphCLWithMRLMethod,
-    GraphCLCSNEMethod,
+    PaGCLMethod,
+    PaGCLWithMRLMethod,
+    PaGCLMCNEMethod,
 )
 
 
-CSNE_METHODS = {"csne", "csne_no_cdmd", "csne_no_hpem", "csne_no_das"}
-GRAPHCL_METHODS = {"graphcl", "graphcl_mrl", "graphcl_csne"}
+MCNE_METHODS = {"mcne", "mcne_no_cdmd", "mcne_no_hpem", "mcne_no_das"}
+GRAPHCL_METHODS = {"graphcl"}
+PAGCL_METHODS = {"pagcl", "pagcl_mrl", "pagcl_mcne"}
 
 
 def is_nested_method(method_name: str) -> bool:
     """Return whether a method evaluates one embedding at several prefix dimensions."""
-    return "mrl" in method_name or "csne" in method_name
+    return "mrl" in method_name or "mcne" in method_name
 
 
 # ============================================================================
@@ -315,7 +311,7 @@ def build_run_dirs(args: argparse.Namespace) -> tuple[Path, Path]:
     results_method_dir.mkdir(parents=True, exist_ok=True)
 
     tag = f"hd{int(args.hidden_dim)}_l{int(args.num_layers)}"
-    if args.method.startswith("grace") or args.method in CSNE_METHODS or args.method in GRAPHCL_METHODS:
+    if args.method in GRAPHCL_METHODS:
         tag = f"{tag}_pd{int(args.proj_dim)}"
     if is_nested_method(args.method):
         tag = f"{tag}_mrl{max(parse_dims(args.mrl_dims))}"
@@ -611,35 +607,11 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             dropout=args.dropout,
-            proj_dim=args.proj_dim,
             tau=args.tau,
             p_feat_mask_1=args.p_feat_mask_1,
             p_edge_drop_1=args.p_edge_drop_1,
             p_feat_mask_2=args.p_feat_mask_2,
             p_edge_drop_2=args.p_edge_drop_2,
-        )
-    if args.method == "dgi_mrl":
-        return DGIWithMRLMethod(
-            in_dim,
-            args.hidden_dim,
-            args.num_layers,
-            args.dropout,
-            mrl_dims=mrl_dims,
-            mrl_weight=args.mrl_weight,
-        )
-    if args.method == "ccassg_mrl":
-        return CCASSGWithMRLMethod(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            lam=args.lam,
-            p_feat_mask_1=args.p_feat_mask_1,
-            p_edge_drop_1=args.p_edge_drop_1,
-            p_feat_mask_2=args.p_feat_mask_2,
-            p_edge_drop_2=args.p_edge_drop_2,
-            mrl_dims=mrl_dims,
-            mrl_weight=args.mrl_weight,
         )
     if args.method == "grace_mrl":
         return GRACEWithMRLMethod(
@@ -647,7 +619,6 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             dropout=args.dropout,
-            proj_dim=args.proj_dim,
             tau=args.tau,
             p_feat_mask_1=args.p_feat_mask_1,
             p_edge_drop_1=args.p_edge_drop_1,
@@ -662,7 +633,6 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             dropout=args.dropout,
-            proj_dim=args.proj_dim,
             tau=args.tau,
             p_feat_mask_1=args.p_feat_mask_1,
             p_edge_drop_1=args.p_edge_drop_1,
@@ -677,23 +647,22 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             cdmd_tau=args.cdmd_tau,
             verbose=True,  # 默认开启 verbose 模式打印损失
         )
-    if args.method in CSNE_METHODS:
-        use_cdmd = bool(args.use_cdmd) and args.method != "csne_no_cdmd"
-        use_hpem = bool(args.use_hpem) and args.method != "csne_no_hpem"
-        use_das = bool(args.use_das) and args.method != "csne_no_das"
+    if args.method in MCNE_METHODS:
+        use_cdmd = bool(args.use_cdmd) and args.method != "mcne_no_cdmd"
+        use_hpem = bool(args.use_hpem) and args.method != "mcne_no_hpem"
+        use_das = bool(args.use_das) and args.method != "mcne_no_das"
         disabled = [
             name
             for name, enabled in (("cdmd", use_cdmd), ("hpem", use_hpem), ("das", use_das))
             if not enabled
         ]
-        expected_alias = "csne" if not disabled else "csne_no_" + "_no_".join(disabled)
+        expected_alias = "mcne" if not disabled else "mcne_no_" + "_no_".join(disabled)
         ablation_name = args.method if args.method == expected_alias else expected_alias
-        return CSNEMethod(
+        return MCNEMethod(
             in_dim=in_dim,
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             dropout=args.dropout,
-            proj_dim=args.proj_dim,
             tau=args.tau,
             p_feat_mask_1=args.p_feat_mask_1,
             p_edge_drop_1=args.p_edge_drop_1,
@@ -726,56 +695,6 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             p_feat_mask_2=args.p_feat_mask_2,
             p_edge_drop_2=args.p_edge_drop_2,
         )
-    if args.method == "ssge_mrl":
-        return SSGEWithMRLMethod(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            lam=args.lam,
-            p_feat_mask_1=args.p_feat_mask_1,
-            p_edge_drop_1=args.p_edge_drop_1,
-            p_feat_mask_2=args.p_feat_mask_2,
-            p_edge_drop_2=args.p_edge_drop_2,
-            mrl_dims=mrl_dims,
-            mrl_weight=args.mrl_weight,
-        )
-    if args.method == "gae":
-        return GAEMethod(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            neg_ratio=args.neg_ratio,
-            use_amp=args.amp,
-        )
-    if args.method == "gae_mrl":
-        return GAEWithMRLMethod(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            mrl_dims=mrl_dims,
-            mrl_weight=args.mrl_weight,
-            neg_ratio=args.neg_ratio,
-            use_amp=args.amp,
-        )
-    if args.method == "lrgae":
-        return LRGAEMethod(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            neg_ratio=args.neg_ratio,
-            variant=args.lrgae_variant,
-            mask_ratio=args.lrgae_mask_ratio,
-            decoder_dim=args.lrgae_decoder_dim,
-            decoder_layers=args.lrgae_decoder_layers,
-            decoder_dropout=args.lrgae_decoder_dropout,
-            decoder_batch_size=args.lrgae_decoder_batch_size,
-            grad_norm=args.lrgae_grad_norm,
-            use_amp=args.amp,
-        )
     if args.method in GRAPHCL_METHODS:
         common = dict(
             in_dim=in_dim,
@@ -790,22 +709,35 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             aug_ratio_2=args.graphcl_aug_ratio_2,
             symmetric_loss=args.graphcl_symmetric_loss,
         )
-        if args.method == "graphcl":
-            return GraphCLMethod(**common)
-        nested = dict(
-            **common,
-            mrl_dims=mrl_dims,
-            mrl_weight=args.mrl_weight,
+        return GraphCLMethod(**common)
+    if args.method in PAGCL_METHODS:
+        common = dict(
+            in_dim=in_dim,
+            hidden_dim=args.hidden_dim,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            proj_dim=args.proj_dim,
+            tau=args.pagcl_tau,
+            augmentation=args.pagcl_augmentation,
+            augmentation_ratio=args.pagcl_augmentation_ratio,
+            sequence_length=args.pagcl_sequence_length,
+            rho=args.pagcl_rho,
+            temporal_eta=args.pagcl_temporal_eta,
+            time_frequencies=args.pagcl_time_frequencies,
+            time_mode=args.pagcl_time_mode,
         )
-        if args.method == "graphcl_mrl":
-            return GraphCLWithMRLMethod(**nested)
-        return GraphCLCSNEMethod(
+        if args.method == "pagcl":
+            return PaGCLMethod(**common)
+        nested = dict(**common, mrl_dims=mrl_dims, mrl_weight=args.mrl_weight)
+        if args.method == "pagcl_mrl":
+            return PaGCLWithMRLMethod(**nested)
+        return PaGCLMCNEMethod(
             **nested,
             ml_weight=args.ml_weight,
-            ml_module=args.ml_module,
             cdmd_tau=args.cdmd_tau,
             hpem_beta_init=args.hpem_beta_init,
-            hpem_tau_0=args.graphcl_hpem_tau_0,
+            hpem_tau_0=args.hpem_tau_0,
+            mcne_weight=args.pagcl_mcne_weight,
             warmup_epochs=args.grace_only_epochs,
             full_epochs=args.grace_ml_epochs,
         )
@@ -1046,8 +978,9 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
             if hasattr(method, "epoch"):
                 method.epoch = ep
 
-            # grace_ML / CSNE 两阶段：进入第二阶段时切换学习率
-            if ((args.method == "grace_ml" or args.method in CSNE_METHODS or args.method == "graphcl_csne")
+            # grace_ML / MCNE 两阶段：进入第二阶段时切换学习率
+            if ((args.method == "grace_ml" or args.method in MCNE_METHODS
+                    or args.method == "pagcl_mcne")
                     and args.grace_ml_lr is not None
                     and ep == args.grace_only_epochs + 1):
                 for pg in optimizer.param_groups:
@@ -1439,7 +1372,7 @@ def save_results(
 def parse_args() -> argparse.Namespace:
     """解析参数。"""
     p = argparse.ArgumentParser(
-        description="统一训练：GCN监督 + DGI/CCA-SSG/GRACE + MRL融合版本",
+        description="统一训练：GCN、DGI、CCA-SSG、SSGE、GRACE、GraphCL 与 PaGCL",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     p.add_argument(
@@ -1451,22 +1384,17 @@ def parse_args() -> argparse.Namespace:
             "dgi",
             "ccassg",
             "grace",
-            "dgi_mrl",
-            "ccassg_mrl",
             "grace_mrl",
             "grace_ml",
-            "csne",
-            "csne_no_cdmd",
-            "csne_no_hpem",
-            "csne_no_das",
+            "mcne",
+            "mcne_no_cdmd",
+            "mcne_no_hpem",
+            "mcne_no_das",
             "ssge",
-            "ssge_mrl",
-            "gae",
-            "gae_mrl",
-            "lrgae",
             "graphcl",
-            "graphcl_mrl",
-            "graphcl_csne",
+            "pagcl",
+            "pagcl_mrl",
+            "pagcl_mcne",
         ],
     )
     p.add_argument("--dataset", type=str, required=True, choices=["arxiv", "reddit2", "products", "mag"])
@@ -1482,16 +1410,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-dims", type=str, default=None,
                    help="依次独立训练多个维度，例如 32,64,128,256,384,512,768")
     p.add_argument("--dropout", type=float, default=0.5)
-    p.add_argument("--proj-dim", type=int, default=256, help="GRACE/GraphCL 投影维度")
+    p.add_argument("--proj-dim", type=int, default=256, help="GraphCL/PaGCL 投影维度；GRACE 不使用投影头")
     p.add_argument("--tau", type=float, default=0.5, help="GRACE 温度系数")
     p.add_argument("--lam", type=float, default=1e-3, help="CCA-SSG λ")
 
     p.add_argument("--p-feat-mask-1", type=float, default=0.3)
     p.add_argument("--p-edge-drop-1", type=float, default=0.2)
-    p.add_argument("--neg-ratio", type=float, default=1.0,
-                   help="GAE 负边采样比例（相对正边数）。大图建议 0.25–0.5，默认 1.0")
-    p.add_argument("--amp", action="store_true", default=False,
-                   help="启用自动混合精度（AMP），可节省约 40%% GPU 显存")
     p.add_argument("--p-feat-mask-2", type=float, default=0.4)
     p.add_argument("--p-edge-drop-2", type=float, default=0.4)
 
@@ -1534,10 +1458,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mrl-dims", type=str, default="64,128,256,512", help="MRL 维度列表（逗号分隔）")
     p.add_argument("--mrl-weight", type=float, default=1.0)
     p.add_argument("--ml-weight", type=float, default=5.0, help="互学习损失权重")
-    p.add_argument("--ml-module", type=str, default="ml", choices=["ml", "ml2"],
-                   help="互学习模块版本: ml=相邻维度互学习, ml2=所有维度向最高维学习")
+    p.add_argument("--ml-module", type=str, default="ml2", choices=["ml", "ml2"],
+                   help="CDMD 对齐方式: ml2=所有低维向最高维学习（默认）, ml=相邻维度学习")
     p.add_argument("--cdmd-tau", type=float, default=0.5,
-                   help="CDMD 相似度分布的 softmax 温度，必须 > 0")
+                   help="兼容旧命令的保留参数；ReLU-CDMD 中不参与计算")
     p.add_argument("--disable-cdmd", dest="use_cdmd", action="store_false", default=True,
                    help="关闭 CDMD；可与其他消融开关组合")
     p.add_argument("--disable-hpem", dest="use_hpem", action="store_false", default=True,
@@ -1569,24 +1493,30 @@ def parse_args() -> argparse.Namespace:
                    help="第二视图增强强度，范围 [0,1)")
     p.add_argument("--graphcl-symmetric-loss", action="store_true", default=False,
                    help="使用双向 GraphCL 损失；默认关闭以贴近原仓库 loss_cal")
-    p.add_argument("--graphcl-hpem-tau-0", type=float, default=0.2,
-                   help="GraphCL_CSNE 的 HPEM 基础温度")
-
-    # ---- LRGAE 特有参数 ----
-    p.add_argument("--lrgae-variant", type=int, default=8, choices=[5, 6, 7, 8],
-                   help="结构型 left-right GAE 变体，默认 lrGAE-8")
-    p.add_argument("--lrgae-mask-ratio", type=float, default=0.7,
-                   help="互补图视图的无向边掩码比例")
-    p.add_argument("--lrgae-decoder-dim", type=int, default=32,
-                   help="lrGAE MLP 边解码器隐藏维度")
-    p.add_argument("--lrgae-decoder-layers", type=int, default=2,
-                   help="lrGAE MLP 边解码器层数")
-    p.add_argument("--lrgae-decoder-dropout", type=float, default=0.2,
-                   help="lrGAE MLP 边解码器 dropout")
-    p.add_argument("--lrgae-decoder-batch-size", type=int, default=131072,
-                   help="lrGAE 边解码分块大小，用于控制高维训练显存")
-    p.add_argument("--lrgae-grad-norm", type=float, default=1.0,
-                   help="lrGAE 梯度裁剪阈值；<=0 表示关闭")
+    # ---- PaGCL (KDD 2025) ----
+    p.add_argument("--pagcl-tau", type=float, default=0.5,
+                   help="PaGCL Eq.(9)-(11) cosine-distance temperature")
+    p.add_argument("--pagcl-rho", type=float, default=1.0,
+                   help="PaGCL variant/negative objective weight rho")
+    p.add_argument("--pagcl-sequence-length", type=int, default=2,
+                   help="Number of progressive augmentation steps (number of views is L+1)")
+    pagcl_aug_choices = sorted([
+        "none", "edge_perturb", "node_drop", "feature_mask", "graph_sampling", "random"
+    ])
+    p.add_argument("--pagcl-augmentation", type=str, default="edge_perturb",
+                   choices=pagcl_aug_choices,
+                   help="Augmentation repeatedly applied to the preceding PaGCL view")
+    p.add_argument("--pagcl-augmentation-ratio", type=float, default=0.2,
+                   help="Per-step progressive augmentation ratio")
+    p.add_argument("--pagcl-temporal-eta", type=float, default=0.3,
+                   help="Temporal aggregation coefficient eta in PaGCL Sec. 3.3")
+    p.add_argument("--pagcl-time-frequencies", type=int, default=16,
+                   help="Number of learnable Fourier frequencies in the time encoder")
+    p.add_argument("--pagcl-time-mode", type=str, default="change",
+                   choices=["change", "index"],
+                   help="Scalable OGB timestamp: feature/degree change proxy or step index")
+    p.add_argument("--pagcl-mcne-weight", type=float, default=1.0,
+                   help="Weight of the adjacent-view MCNE regularizer in PaGCL-MCNE")
 
     p.add_argument("--eval-only", action="store_true",
                    help="仅评估模式：跳过训练，直接从 --checkpoint 加载模型进行PCA/标准评估")
@@ -1664,14 +1594,15 @@ def main() -> None:
             return
         t_start = time.time()
 
-        # grace_ML / CSNE 两阶段 epoch 处理：支持显式指定两个阶段的训练轮数
+        # grace_ML / MCNE 两阶段 epoch 处理：支持显式指定两个阶段的训练轮数
         if args.grace_only_epochs is not None or args.grace_ml_epochs is not None:
             goe = args.grace_only_epochs if args.grace_only_epochs is not None else args.pretrain_epochs // 2
             gme = args.grace_ml_epochs if args.grace_ml_epochs is not None else args.pretrain_epochs // 2
             args.grace_only_epochs = goe
             args.grace_ml_epochs = gme
             args.pretrain_epochs = goe + gme
-        elif args.method == "grace_ml" or args.method in CSNE_METHODS or args.method == "graphcl_csne":
+        elif (args.method == "grace_ml" or args.method in MCNE_METHODS
+              or args.method == "pagcl_mcne"):
             args.grace_only_epochs = args.pretrain_epochs // 2
             args.grace_ml_epochs = args.pretrain_epochs - args.grace_only_epochs
 
@@ -1680,8 +1611,7 @@ def main() -> None:
             args.dataset,
             args.root,
             logger=None,
-            # The official lrGAE protocol consumes the original node features.
-            normalize_ogb_features=args.method != "lrgae",
+            normalize_ogb_features=True,
         )
 
         train_seed = 0

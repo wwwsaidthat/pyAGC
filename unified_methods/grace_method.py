@@ -24,7 +24,6 @@ class GRACECore(nn.Module):
         hidden_dim: int,
         num_layers: int,
         dropout: float,
-        proj_dim: int,
         tau: float,
         p_feat_mask_1: float,
         p_edge_drop_1: float,
@@ -40,21 +39,16 @@ class GRACECore(nn.Module):
             dropout=dropout,
             norm="batch_norm",
         )
-        self.projector = nn.Sequential(
-            nn.Linear(hidden_dim, proj_dim),
-            nn.ReLU(),
-            nn.Linear(proj_dim, proj_dim),
-        )
         self.tau = tau
         self.t1 = GSSLTransform(p_feat_mask_1, p_edge_drop_1, node_attrs=["x"], edge_attrs=[])
         self.t2 = GSSLTransform(p_feat_mask_2, p_edge_drop_2, node_attrs=["x"], edge_attrs=[])
 
     @staticmethod
-    def nt_xent(z1: Tensor, z2: Tensor, tau: float) -> Tensor:
-        z1 = F.normalize(z1, dim=-1)
-        z2 = F.normalize(z2, dim=-1)
-        sim = torch.mm(z1, z2.t()) / tau
-        labels = torch.arange(z1.size(0), device=z1.device)
+    def nt_xent(h1: Tensor, h2: Tensor, tau: float) -> Tensor:
+        h1 = F.normalize(h1, dim=-1)
+        h2 = F.normalize(h2, dim=-1)
+        sim = torch.mm(h1, h2.t()) / tau
+        labels = torch.arange(h1.size(0), device=h1.device)
         return 0.5 * (F.cross_entropy(sim, labels) + F.cross_entropy(sim.t(), labels))
 
     def embed(self, x: Tensor, edge_index: Tensor) -> Tensor:
@@ -68,9 +62,7 @@ class GRACECore(nn.Module):
         if seed_size is not None:
             h1 = h1[:seed_size]
             h2 = h2[:seed_size]
-        z1 = self.projector(h1)
-        z2 = self.projector(h2)
-        return self.nt_xent(z1, z2, self.tau)
+        return self.nt_xent(h1, h2, self.tau)
 
 
 class GRACEMethod(BaseMethod):
@@ -82,7 +74,6 @@ class GRACEMethod(BaseMethod):
         hidden_dim: int,
         num_layers: int,
         dropout: float,
-        proj_dim: int,
         tau: float,
         p_feat_mask_1: float,
         p_edge_drop_1: float,
@@ -95,7 +86,6 @@ class GRACEMethod(BaseMethod):
             hidden_dim=hidden_dim,
             num_layers=num_layers,
             dropout=dropout,
-            proj_dim=proj_dim,
             tau=tau,
             p_feat_mask_1=p_feat_mask_1,
             p_edge_drop_1=p_edge_drop_1,

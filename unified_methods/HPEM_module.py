@@ -1,6 +1,6 @@
 """HPEM (Hard-Pair Evolutionary Mining) 损失计算模块。
 
-实现论文 CSNE 框架 Section 3.3 的 HPEM 机制，并内置维度自适应 temperature
+实现论文 MCNE 框架的 HPEM 机制，并内置维度自适应 temperature
 （原 DAS 组件 A）——因为 τ_i 的唯一消费者就是 HPEM，放在这里消除不必要的参数传递。
 
 核心公式：
@@ -27,11 +27,11 @@ from torch import Tensor
 # 基础工具函数
 # ============================================================================
 
-def _rowwise_cosine_similarity(z1: Tensor, z2: Tensor, eps: float = 1e-8) -> Tensor:
+def _rowwise_cosine_similarity(h1: Tensor, h2: Tensor, eps: float = 1e-8) -> Tensor:
     r"""计算两个视图之间的 B×B 余弦相似度矩阵。"""
-    z1_norm = F.normalize(z1, p=2, dim=-1, eps=eps)
-    z2_norm = F.normalize(z2, p=2, dim=-1, eps=eps)
-    return z1_norm @ z2_norm.T
+    h1_norm = F.normalize(h1, p=2, dim=-1, eps=eps)
+    h2_norm = F.normalize(h2, p=2, dim=-1, eps=eps)
+    return h1_norm @ h2_norm.T
 
 
 def _inv_softplus(x: float) -> float:
@@ -46,8 +46,8 @@ def _inv_softplus(x: float) -> float:
 # ============================================================================
 
 def compute_confusion_scores(
-    z1_prev: Tensor,
-    z2_prev: Tensor,
+    h1_prev: Tensor,
+    h2_prev: Tensor,
 ) -> Tensor:
     r"""用小维度 prefix 计算每个 anchor 的 confusion score。
 
@@ -56,13 +56,13 @@ def compute_confusion_scores(
     c_u 越小（甚至为负），说明小维度 prefix 对这个 anchor 区分能力越弱。
 
     参数:
-        z1_prev: (B, D_prev) 小维度 prefix 的第一视图嵌入
-        z2_prev: (B, D_prev) 小维度 prefix 的第二视图嵌入
+        h1_prev: (B, D_prev) 小维度 prefix 的第一视图编码器输出
+        h2_prev: (B, D_prev) 小维度 prefix 的第二视图编码器输出
 
     返回:
         confusion: (B,) 每个 anchor 的 confusion score
     """
-    S = _rowwise_cosine_similarity(z1_prev, z2_prev)  # (B, B)
+    S = _rowwise_cosine_similarity(h1_prev, h2_prev)  # (B, B)
     B = S.size(0)
 
     pos_sim = S.diag()  # (B,)
@@ -109,8 +109,8 @@ def confusion_to_weights(
 # ============================================================================
 
 def compute_per_anchor_infonce(
-    z1: Tensor,
-    z2: Tensor,
+    h1: Tensor,
+    h2: Tensor,
     tau: Tensor,
 ) -> Tensor:
     r"""计算每个 anchor 的 InfoNCE loss（不做 mean）。
@@ -118,13 +118,13 @@ def compute_per_anchor_infonce(
     ℓ_u = -S[u,u]/τ + logsumexp_v(S[u,v]/τ)
 
     参数:
-        z1, z2: (B, D) 嵌入
+        h1, h2: (B, D) 编码器输出
         tau: 标量 tensor，temperature
 
     返回:
         per_anchor_loss: (B,)
     """
-    S = _rowwise_cosine_similarity(z1, z2)  # (B, B)
+    S = _rowwise_cosine_similarity(h1, h2)  # (B, B)
     pos_sim = S.diag()  # (B,)
     log_sum_exp = torch.logsumexp(S / tau, dim=1)  # (B,)
     per_anchor_loss = -pos_sim / tau + log_sum_exp  # (B,)
@@ -136,10 +136,10 @@ def compute_per_anchor_infonce(
 # ============================================================================
 
 def compute_hpem_loss(
-    z1_curr: Tensor,
-    z2_curr: Tensor,
-    z1_prev: Tensor,
-    z2_prev: Tensor,
+    h1_curr: Tensor,
+    h2_curr: Tensor,
+    h1_prev: Tensor,
+    h2_prev: Tensor,
     tau: Tensor,
     beta: Tensor,
 ) -> Tensor:
@@ -148,8 +148,8 @@ def compute_hpem_loss(
     L_HPEM^i = Σ_u w_u^{(i)} · ℓ_InfoNCE(u; H^{(i)})    （weighted mean 量级）
 
     参数:
-        z1_curr, z2_curr: (B, D_i) 当前维度 prefix 嵌入
-        z1_prev, z2_prev: (B, D_{i-1}) 上一维度 prefix 嵌入
+        h1_curr, h2_curr: (B, D_i) 当前维度 prefix 的编码器输出
+        h1_prev, h2_prev: (B, D_{i-1}) 上一维度 prefix 的编码器输出
         tau: 标量 tensor，当前维度的 temperature
         beta: 标量 tensor，可学习 scaling parameter
 
@@ -157,9 +157,9 @@ def compute_hpem_loss(
         hpem_loss: 标量
     """
 
-    confusion = compute_confusion_scores(z1_prev, z2_prev)  # (B,)
+    confusion = compute_confusion_scores(h1_prev, h2_prev)  # (B,)
     weights = confusion_to_weights(confusion, tau, beta)  # (B,)
-    per_anchor_loss = compute_per_anchor_infonce(z1_curr, z2_curr, tau)  # (B,)
+    per_anchor_loss = compute_per_anchor_infonce(h1_curr, h2_curr, tau)  # (B,)
 
     hpem_loss = (weights * per_anchor_loss).sum()
     return hpem_loss
@@ -181,8 +181,8 @@ class HPEMLoss(nn.Module):
 
         # 自动计算 τ_i，无需外部传入 tau
         loss = hpem.compute_single(
-            z1_curr=z1[:, :512], z2_curr=z2[:, :512],
-            z1_prev=z1[:, :256], z2_prev=z2[:, :256],
+            h1_curr=h1[:, :512], h2_curr=h2[:, :512],
+            h1_prev=h1[:, :256], h2_prev=h2[:, :256],
             dim_curr=512,
         )
     """
@@ -243,17 +243,17 @@ class HPEMLoss(nn.Module):
 
     def compute_single(
         self,
-        z1_curr: Tensor,
-        z2_curr: Tensor,
-        z1_prev: Tensor,
-        z2_prev: Tensor,
+        h1_curr: Tensor,
+        h2_curr: Tensor,
+        h1_prev: Tensor,
+        h2_prev: Tensor,
         dim_curr: int,
     ) -> Tensor:
         r"""计算单个维度 prefix i 的 HPEM 损失（自动使用该维度的 τ_i）。
 
         参数:
-            z1_curr, z2_curr: 当前维度 prefix 嵌入
-            z1_prev, z2_prev: 上一维度 prefix 嵌入
+            h1_curr, h2_curr: 当前维度 prefix 的编码器输出
+            h1_prev, h2_prev: 上一维度 prefix 的编码器输出
             dim_curr: 当前维度的数值，用于计算 τ_i
 
         返回:
@@ -261,18 +261,18 @@ class HPEMLoss(nn.Module):
         """
         tau = self.get_tau(dim_curr)
         return compute_hpem_loss(
-            z1_curr=z1_curr,
-            z2_curr=z2_curr,
-            z1_prev=z1_prev,
-            z2_prev=z2_prev,
+            h1_curr=h1_curr,
+            h2_curr=h2_curr,
+            h1_prev=h1_prev,
+            h2_prev=h2_prev,
             tau=tau,
             beta=self.beta,
         )
 
     def compute_all(
         self,
-        z1_full: Tensor,
-        z2_full: Tensor,
+        h1_full: Tensor,
+        h2_full: Tensor,
         mrl_dims: Sequence[int],
     ) -> Tensor:
         r"""对所有相邻维度对计算 HPEM 损失总和。
@@ -281,7 +281,7 @@ class HPEMLoss(nn.Module):
         dim[0]（最小维度）不计算 HPEM。
 
         参数:
-            z1_full, z2_full: (B, max_dim) 完整嵌入
+            h1_full, h2_full: (B, max_dim) 完整编码器输出
             mrl_dims: 维度列表，已排序，如 [64, 128, 256, 512]
 
         返回:
@@ -289,17 +289,17 @@ class HPEMLoss(nn.Module):
         """
         sorted_dims = sorted(mrl_dims)
         if len(sorted_dims) < 2:
-            return torch.zeros((), device=z1_full.device)
+            return torch.zeros((), device=h1_full.device)
 
-        total = torch.zeros((), device=z1_full.device)
+        total = torch.zeros((), device=h1_full.device)
         for i in range(1, len(sorted_dims)):
             dim_prev = sorted_dims[i - 1]
             dim_curr = sorted_dims[i]
             total = total + self.compute_single(
-                z1_curr=z1_full[:, :dim_curr],
-                z2_curr=z2_full[:, :dim_curr],
-                z1_prev=z1_full[:, :dim_prev],
-                z2_prev=z2_full[:, :dim_prev],
+                h1_curr=h1_full[:, :dim_curr],
+                h2_curr=h2_full[:, :dim_curr],
+                h1_prev=h1_full[:, :dim_prev],
+                h2_prev=h2_full[:, :dim_prev],
                 dim_curr=dim_curr,
             )
         return total

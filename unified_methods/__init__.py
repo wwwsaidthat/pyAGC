@@ -2,22 +2,17 @@
 
 from .base_method import BaseMethod
 from .ccassg_method import CCASSGMethod
-from .ccassg_mrl_method import CCASSGWithMRLMethod
 from .dgi_method import DGIMethod
-from .dgi_mrl_method import DGIWithMRLMethod
 from .gcn_supervised_method import SupervisedGCNMethod
 from .grace_method import GRACEMethod
 from .grace_mrl_method import GRACEWithMRLMethod
 from .grace_ML import GRACEWithMRLMutualLearningMethod
-from .csne_method import CSNEMethod
+from .mcne_method import MCNEMethod
 from .ssge_method import SSGEMethod
-from .ssge_mrl_method import SSGEWithMRLMethod
-from .gae_method import GAEMethod
-from .gae_mrl_method import GAEWithMRLMethod
-from .lrgae_method import LRGAEMethod
 from .graphcl_method import GraphCLMethod
-from .graphcl_mrl_method import GraphCLWithMRLMethod
-from .graphcl_csne_method import GraphCLCSNEMethod
+from .pagcl_method import PaGCLMethod
+from .pagcl_mrl_method import PaGCLWithMRLMethod
+from .pagcl_mcne_method import PaGCLMCNEMethod
 
 __all__ = [
     "BaseMethod",
@@ -25,17 +20,12 @@ __all__ = [
     "DGIMethod",
     "CCASSGMethod",
     "GRACEMethod",
-    "DGIWithMRLMethod",
-    "CCASSGWithMRLMethod",
     "GRACEWithMRLMethod",
     "GRACEWithMRLMutualLearningMethod",
-    "CSNEMethod",
+    "MCNEMethod",
     "SSGEMethod",
-    "SSGEWithMRLMethod",
-    "GAEMethod",
-    "GAEWithMRLMethod",
-    "LRGAEMethod",
     "GraphCLMethod",
-    "GraphCLWithMRLMethod",
-    "GraphCLCSNEMethod",
+    "PaGCLMethod",
+    "PaGCLWithMRLMethod",
+    "PaGCLMCNEMethod",
 ]

@@ -1,12 +1,12 @@
 """DAS (Dimension-Adaptive Loss Scheduling) 模块。
 
-实现论文 CSNE 框架 Section 3.4 的 DAS 组件 B——维度相关的 HPEM 损失权重。
+实现论文 MCNE 框架的 DALS 组件——维度相关的 HPEM 损失权重。
 
 组件 A（维度自适应 temperature τ_i）已迁移至 HPEM_module.py，
 因为 τ_i 的唯一消费者就是 HPEM。
 
 总损失公式：
-    L_CSNE = Σ_{i>1} L_CDMD^{i-1,i} + Σ_i exp(λ · d_i/d_n) · L_HPEM^i
+    L_MCNE = L_CDMD + Σ_i exp(λ · d_i/d_n) · L_HPEM^i
 
 可学习参数：
     λ (lam): 控制 HPEM 损失权重随维度指数增长的系数

@@ -1,10 +1,7 @@
 # Node-level large-graph adaptation of GraphCL (NeurIPS 2020).
 # Official repository: https://github.com/Shen-Lab/GraphCL
 #
-# Methods:
-#   graphcl       - GIN + GraphCL augmentations + original contrastive denominator
-#   graphcl_mrl   - one 768-d model, prefix dimensions trained jointly
-#   graphcl_csne  - GraphCL_MRL + CDMD + HPEM + DAS
+# Method: graphcl - GIN + GraphCL augmentations + original contrastive denominator
 
 default:
   num_layers: 2
@@ -18,14 +15,6 @@ default:
   graphcl_aug_ratio_1: 0.2
   graphcl_aug_ratio_2: 0.2
   graphcl_symmetric_loss: false
-
-  mrl_dims: 32,64,128,256,384,512,768
-  mrl_weight: 1.0
-  ml_weight: 1.0
-  ml_module: ml
-  cdmd_tau: 0.5
-  hpem_beta_init: 0.1
-  graphcl_hpem_tau_0: 0.2
 
   pretrain_lr: 0.001
   pretrain_weight_decay: 0.00001
