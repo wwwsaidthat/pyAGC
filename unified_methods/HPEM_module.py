@@ -1,10 +1,9 @@
 """HPEM (Hard-Pair Evolutionary Mining) 损失计算模块。
 
-实现论文 MCNE 框架的 HPEM 机制，并内置维度自适应 temperature
-（原 DAS 组件 A）——因为 τ_i 的唯一消费者就是 HPEM，放在这里消除不必要的参数传递。
+实现论文 MCNE 框架的 HPEM 机制，并支持 DALS 的维度自适应温度：
 
 核心公式：
-    τ_i = τ_0 · exp(φ_1 · d_i/d_n + φ_2)                        ← 维度自适应温度
+    τ_i = τ_0 · exp(φ_1 · d_i/d_K + φ_2)
     c_u^{(i-1)} = sim(h_u^{(i-1)}, h_{v^+}^{(i-1)}) - max_{v^-} sim(...)
     w_u^{(i)} = softmax(-β · c_u^{(i-1)} / τ_i)
     L_HPEM^i = Σ_u w_u^{(i)} · ℓ_InfoNCE(u; H^{(i)})
@@ -166,76 +165,127 @@ def compute_hpem_loss(
 
 
 # ============================================================================
-# HPEMLoss 类（高级接口，内置维度自适应 temperature）
+# HPEMLoss 类（高级接口，支持维度自适应 temperature）
 # ============================================================================
 
 class HPEMLoss(nn.Module):
     r"""HPEM 损失计算器。
 
     可学习参数：
-        β:       confusion → weight 缩放系数（softplus 保证 > 0）
-        φ_1, φ_2: 维度自适应 temperature，τ_i = τ_0 · exp(φ_1 · d_i/d_n + φ_2)
+        β: confusion → weight 缩放系数（softplus 保证 > 0）
+        φ_1, φ_2: τ_i = τ_0 · exp(φ_1 · d_i/d_K + φ_2)
 
     使用示例:
-        hpem = HPEMLoss(tau_0=0.5, max_dim=768, beta_init=0.1)
+        hpem = HPEMLoss(tau_0=0.1, max_dim=768, beta_init=0.1)
 
-        # 自动计算 τ_i，无需外部传入 tau
         loss = hpem.compute_single(
             h1_curr=h1[:, :512], h2_curr=h2[:, :512],
             h1_prev=h1[:, :256], h2_prev=h2[:, :256],
             dim_curr=512,
         )
+
+    仅提供 ``tau`` 时使用固定温度；MCNE 同时提供 ``tau_0`` 和
+    ``max_dim`` 以启用维度自适应温度。
     """
 
     def __init__(
         self,
-        tau_0: float = 0.5,
-        max_dim: int = 768,
+        tau: Optional[float] = None,
         beta_init: float = 0.1,
+        *,
+        tau_0: Optional[float] = None,
+        max_dim: Optional[int] = None,
+        phi_1_init: float = 0.0,
+        phi_2_init: float = 0.0,
     ):
         """
         参数:
-            tau_0: 基础温度 τ_0
-            max_dim: 最大维度 d_n，用于归一化 d_i / d_n
+            tau: 固定温度的向后兼容参数
+            tau_0: 自适应温度的基础值
+            max_dim: 最大维度 d_K
             beta_init: β 的初始值
+            phi_1_init, phi_2_init: φ_1、φ_2 的初始值
         """
         super().__init__()
+        if tau_0 is None:
+            tau_0 = 0.5 if tau is None else tau
+        if tau_0 <= 0:
+            raise ValueError("tau_0 must be > 0")
+        if max_dim is not None and max_dim <= 0:
+            raise ValueError("max_dim must be > 0")
+
         self.tau_0 = float(tau_0)
-        self.max_dim = int(max_dim)
+        # 保留旧属性，避免外部代码读取 hpem.tau 时失效。
+        self.tau = self.tau_0
+        self.max_dim = int(max_dim) if max_dim is not None else None
 
         # β：confusion → weight 缩放
         self._beta_raw = nn.Parameter(
             torch.tensor(_inv_softplus(beta_init))
         )
 
-        # φ_1, φ_2：维度自适应 temperature
-        # 初始化 φ_1 = φ_2 = 0 → g_φ(1) = 1 → τ_max = τ_0
-        self.phi_1 = nn.Parameter(torch.tensor(0.0))
-        self.phi_2 = nn.Parameter(torch.tensor(0.0))
+        # 仅 MCNE（提供 max_dim）启用维度自适应温度；旧调用保持固定温度，
+        # 也不会引入无效的可学习参数。
+        if self.max_dim is not None:
+            self.phi_1 = nn.Parameter(torch.tensor(float(phi_1_init)))
+            self.phi_2 = nn.Parameter(torch.tensor(float(phi_2_init)))
+        else:
+            self.register_parameter("phi_1", None)
+            self.register_parameter("phi_2", None)
 
     @property
     def beta(self) -> Tensor:
         """保证 β 始终为正。"""
         return F.softplus(self._beta_raw)
 
-    # ------------------------------------------------------------------
-    # 维度自适应 temperature（原 DAS 组件 A）
-    # ------------------------------------------------------------------
+    def get_tau(
+        self,
+        dim: Optional[int] = None,
+        use_adaptive_temperature: bool = True,
+    ) -> Tensor:
+        r"""返回当前维度的温度。
 
-    def get_tau(self, dim: int) -> Tensor:
-        r"""返回维度 dim 的 temperature。
+        当启用 DALS 时：
+            τ_i = τ_0 · exp(φ_1 · d_i/d_K + φ_2)
 
-        τ_i = τ_0 · exp(φ_1 · d_i/d_n + φ_2)
-
-        参数:
-            dim: 当前维度 d_i
-
-        返回:
-            tau_i: 标量 tensor
+        当关闭 DALS 或该实例未配置 ``max_dim`` 时，返回固定的 τ_0。
         """
-        x = dim / self.max_dim
-        g = torch.exp(self.phi_1 * x + self.phi_2)
-        return torch.tensor(self.tau_0, device=g.device, dtype=g.dtype) * g
+        reference = self._beta_raw
+        tau_0 = reference.new_tensor(self.tau_0)
+        if not use_adaptive_temperature or self.max_dim is None:
+            return tau_0
+        if dim is None:
+            raise ValueError("adaptive temperature requires dim")
+        if dim <= 0 or dim > self.max_dim:
+            raise ValueError(f"dim must be in [1, {self.max_dim}], got {dim}")
+        x = float(dim) / float(self.max_dim)
+        return tau_0 * torch.exp(self.phi_1 * x + self.phi_2)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        """兼容恢复自适应温度之前保存的 MCNE checkpoint。"""
+        for name in ("phi_1", "phi_2"):
+            parameter = getattr(self, name)
+            key = prefix + name
+            if parameter is not None and key not in state_dict:
+                state_dict[key] = parameter.detach().clone()
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     # ------------------------------------------------------------------
     # 损失计算
@@ -247,19 +297,23 @@ class HPEMLoss(nn.Module):
         h2_curr: Tensor,
         h1_prev: Tensor,
         h2_prev: Tensor,
-        dim_curr: int,
+        dim_curr: Optional[int] = None,
+        use_adaptive_temperature: bool = True,
     ) -> Tensor:
-        r"""计算单个维度 prefix i 的 HPEM 损失（自动使用该维度的 τ_i）。
+        r"""计算单个维度 prefix i 的 HPEM 损失。
 
         参数:
             h1_curr, h2_curr: 当前维度 prefix 的编码器输出
             h1_prev, h2_prev: 上一维度 prefix 的编码器输出
-            dim_curr: 当前维度的数值，用于计算 τ_i
-
+            dim_curr: 当前维度 d_i
+            use_adaptive_temperature: 是否使用 DALS 的 τ_i
         返回:
             hpem_loss: 标量
         """
-        tau = self.get_tau(dim_curr)
+        tau = self.get_tau(
+            dim=dim_curr,
+            use_adaptive_temperature=use_adaptive_temperature,
+        ).to(device=h1_curr.device, dtype=h1_curr.dtype)
         return compute_hpem_loss(
             h1_curr=h1_curr,
             h2_curr=h2_curr,
@@ -311,8 +365,12 @@ class HPEMLoss(nn.Module):
     def log_info(self) -> dict:
         """返回当前可学习参数的快照，用于日志记录。"""
         with torch.no_grad():
-            return {
-                "hpem_beta": float(self.beta.item()),
-                "hpem_phi_1": float(self.phi_1.item()),
-                "hpem_phi_2": float(self.phi_2.item()),
-            }
+            info = {"hpem_beta": float(self.beta.item())}
+            if self.phi_1 is not None and self.phi_2 is not None:
+                info.update(
+                    {
+                        "hpem_phi_1": float(self.phi_1.item()),
+                        "hpem_phi_2": float(self.phi_2.item()),
+                    }
+                )
+            return info

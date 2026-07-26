@@ -1,19 +1,22 @@
-"""DAS (Dimension-Adaptive Loss Scheduling) 模块。
+"""DALS (Dimension-Adaptive Loss Scheduling) 模块。
 
-实现论文 MCNE 框架的 DALS 组件——维度相关的 HPEM 损失权重。
+实现论文 MCNE 框架的 DALS 组件——维度自适应温度与 HPEM 损失权重。
 
-组件 A（维度自适应 temperature τ_i）已迁移至 HPEM_module.py，
-因为 τ_i 的唯一消费者就是 HPEM。
+组件 A（维度自适应温度）由 HPEM_module.py 计算：
+    τ_i = τ_0 · exp(φ_1 · d_i/d_K + φ_2)
+
+组件 B（本模块）计算维度相关的 HPEM 损失权重：
+    α_i = exp(λ · d_i/d_K)
 
 总损失公式：
-    L_MCNE = L_CDMD + Σ_i exp(λ · d_i/d_n) · L_HPEM^i
+    L_MCNE = L_CDMD + Σ_i exp(λ · d_i/d_K) · L_HPEM^i
 
 可学习参数：
     λ (lam): 控制 HPEM 损失权重随维度指数增长的系数
 
 模块职责：
-    - 输入维度 d_i 和最大维度 d_n
-    - 返回该维度的 HPEM 损失权重 w_i = exp(λ · d_i/d_n)
+    - 输入维度 d_i 和最大维度 d_K
+    - 返回该维度的 HPEM 损失权重 w_i = exp(λ · d_i/d_K)
     - 完全独立、可复用
 """
 
@@ -22,8 +25,8 @@ import torch.nn as nn
 from torch import Tensor
 
 
-class DASScheduler(nn.Module):
-    r"""DAS 调度器：维度相关的 HPEM 损失权重。
+class DALSScheduler(nn.Module):
+    r"""DALS 调度器：维度相关的 HPEM 损失权重。
 
     可学习参数：
         lam (λ): HPEM 损失权重的指数系数
@@ -31,14 +34,14 @@ class DASScheduler(nn.Module):
                  λ > 0 → 高维获得更大 HPEM 权重
 
     使用示例:
-        das = DASScheduler(max_dim=768)
-        w_i = das.get_hpem_weight(256)  # exp(λ · 256/768)
+        dals = DALSScheduler(max_dim=768)
+        w_i = dals.get_hpem_weight(256)  # exp(λ · 256/768)
     """
 
     def __init__(self, max_dim: int = 768):
         """
         参数:
-            max_dim: 最大维度 d_n，用于归一化 d_i / d_n
+            max_dim: 最大维度 d_K，用于归一化 d_i / d_K
         """
         super().__init__()
         self.max_dim = int(max_dim)
@@ -52,7 +55,7 @@ class DASScheduler(nn.Module):
     def get_hpem_weight(self, dim: int) -> Tensor:
         r"""返回维度 dim 的 HPEM 损失权重。
 
-        w_i = exp(λ · d_i / d_n)
+        w_i = exp(λ · d_i / d_K)
 
         参数:
             dim: 当前维度 d_i
@@ -70,4 +73,4 @@ class DASScheduler(nn.Module):
     def log_info(self) -> dict:
         r"""返回当前可学习参数的快照，用于日志记录。"""
         with torch.no_grad():
-            return {"das_lam": float(self.lam.item())}
+            return {"dals_lam": float(self.lam.item())}

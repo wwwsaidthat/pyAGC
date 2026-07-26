@@ -38,7 +38,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from .grace_mrl_method import GRACEWithMRLMethod
-from .ML_module import MutualLearningLoss
+from .CDMD_module import CDMDLoss
 
 
 class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
@@ -83,16 +83,16 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         self.verbose = verbose
 
         if ml_module == "ml2":
-            from .ML_module2 import MutualLearningLoss2
-            self.ml_calculator = MutualLearningLoss2(
+            from .CDMD_module2 import CDMDLoss2
+            self.ml_calculator = CDMDLoss2(
                 mrl_dims=self.mrl_dims,
-                ml_weight=ml_weight,
+                cdmd_weight=ml_weight,
                 tau=cdmd_tau,
             )
         else:
-            self.ml_calculator = MutualLearningLoss(
+            self.ml_calculator = CDMDLoss(
                 mrl_dims=self.mrl_dims,
-                ml_weight=ml_weight,
+                cdmd_weight=ml_weight,
                 tau=cdmd_tau,
             )
         self.epoch = 0
@@ -116,7 +116,7 @@ class GRACEWithMRLMutualLearningMethod(GRACEWithMRLMethod):
         - 第二阶段（epoch > grace_only_epochs）：加入互学习损失
 
         互学习损失部分（v4）：
-        直接传入完整编码器输出，由 MutualLearningLoss.compute()
+        直接传入完整编码器输出，由 CDMDLoss.compute()
         内部处理：切片 → B×B 矩阵 → flatten → ReLU → 双向相对熵 / B
 
         参数:

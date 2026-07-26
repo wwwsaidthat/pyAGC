@@ -6,7 +6,6 @@
 default:
   num_layers: 2
   hidden_dim: 768
-  proj_dim: 768
   dropout: 0.0
 
   graphcl_tau: 0.2

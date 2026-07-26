@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""统一训练脚本：GCN、DGI、CCA-SSG、SSGE、GRACE、GraphCL 与 PaGCL。"""
+"""统一训练脚本：监督 GCN 与多种图自监督表示学习方法。"""
 
 import argparse
 import hashlib
@@ -26,7 +26,6 @@ import platform
 import torch
 import torch.nn as nn
 import yaml
-from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch import Tensor
 from torch_geometric.data import Data
@@ -43,15 +42,11 @@ from unified_methods import (
     SSGEMethod,
     SupervisedGCNMethod,
     GraphCLMethod,
-    PaGCLMethod,
-    PaGCLWithMRLMethod,
-    PaGCLMCNEMethod,
 )
 
 
-MCNE_METHODS = {"mcne", "mcne_no_cdmd", "mcne_no_hpem", "mcne_no_das"}
+MCNE_METHODS = {"mcne", "mcne_no_cdmd", "mcne_no_hpem", "mcne_no_dals"}
 GRAPHCL_METHODS = {"graphcl"}
-PAGCL_METHODS = {"pagcl", "pagcl_mrl", "pagcl_mcne"}
 
 
 def is_nested_method(method_name: str) -> bool:
@@ -311,8 +306,6 @@ def build_run_dirs(args: argparse.Namespace) -> tuple[Path, Path]:
     results_method_dir.mkdir(parents=True, exist_ok=True)
 
     tag = f"hd{int(args.hidden_dim)}_l{int(args.num_layers)}"
-    if args.method in GRAPHCL_METHODS:
-        tag = f"{tag}_pd{int(args.proj_dim)}"
     if is_nested_method(args.method):
         tag = f"{tag}_mrl{max(parse_dims(args.mrl_dims))}"
     run_name = f"{stable_run_id(args)}_{tag}"
@@ -650,10 +643,10 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
     if args.method in MCNE_METHODS:
         use_cdmd = bool(args.use_cdmd) and args.method != "mcne_no_cdmd"
         use_hpem = bool(args.use_hpem) and args.method != "mcne_no_hpem"
-        use_das = bool(args.use_das) and args.method != "mcne_no_das"
+        use_dals = bool(args.use_dals) and args.method != "mcne_no_dals"
         disabled = [
             name
-            for name, enabled in (("cdmd", use_cdmd), ("hpem", use_hpem), ("das", use_das))
+            for name, enabled in (("cdmd", use_cdmd), ("hpem", use_hpem), ("dals", use_dals))
             if not enabled
         ]
         expected_alias = "mcne" if not disabled else "mcne_no_" + "_no_".join(disabled)
@@ -675,9 +668,11 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             cdmd_tau=args.cdmd_tau,
             hpem_beta_init=args.hpem_beta_init,
             hpem_tau_0=args.hpem_tau_0,
+            hpem_phi_1_init=args.hpem_phi_1_init,
+            hpem_phi_2_init=args.hpem_phi_2_init,
             use_cdmd=use_cdmd,
             use_hpem=use_hpem,
-            use_das=use_das,
+            use_dals=use_dals,
             ablation_name=ablation_name,
             warmup_epochs=args.grace_only_epochs,
             full_epochs=args.grace_ml_epochs,
@@ -701,7 +696,7 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             hidden_dim=args.hidden_dim,
             num_layers=args.num_layers,
             dropout=args.dropout,
-            proj_dim=args.proj_dim,
+            proj_dim=args.hidden_dim,
             tau=args.graphcl_tau,
             aug_1=args.graphcl_aug_1,
             aug_2=args.graphcl_aug_2,
@@ -710,37 +705,6 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             symmetric_loss=args.graphcl_symmetric_loss,
         )
         return GraphCLMethod(**common)
-    if args.method in PAGCL_METHODS:
-        common = dict(
-            in_dim=in_dim,
-            hidden_dim=args.hidden_dim,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            proj_dim=args.proj_dim,
-            tau=args.pagcl_tau,
-            augmentation=args.pagcl_augmentation,
-            augmentation_ratio=args.pagcl_augmentation_ratio,
-            sequence_length=args.pagcl_sequence_length,
-            rho=args.pagcl_rho,
-            temporal_eta=args.pagcl_temporal_eta,
-            time_frequencies=args.pagcl_time_frequencies,
-            time_mode=args.pagcl_time_mode,
-        )
-        if args.method == "pagcl":
-            return PaGCLMethod(**common)
-        nested = dict(**common, mrl_dims=mrl_dims, mrl_weight=args.mrl_weight)
-        if args.method == "pagcl_mrl":
-            return PaGCLWithMRLMethod(**nested)
-        return PaGCLMCNEMethod(
-            **nested,
-            ml_weight=args.ml_weight,
-            cdmd_tau=args.cdmd_tau,
-            hpem_beta_init=args.hpem_beta_init,
-            hpem_tau_0=args.hpem_tau_0,
-            mcne_weight=args.pagcl_mcne_weight,
-            warmup_epochs=args.grace_only_epochs,
-            full_epochs=args.grace_ml_epochs,
-        )
     raise ValueError(f"未知方法: {args.method}")
 
 
@@ -757,47 +721,6 @@ def summarize_values(values: List[float]) -> Dict[str, float]:
         "variance": float(arr.var(ddof=1 if len(arr) > 1 else 0)),
         "std": float(arr.std(ddof=1 if len(arr) > 1 else 0)),
     }
-
-
-def apply_pca(features: Tensor, target_dim: int, train_idx: Tensor, random_state: int = 0) -> Tensor:
-    """对特征矩阵执行PCA降维（仅在训练集上拟合，防止数据泄露）。
-
-    Args:
-        features: [N, D] 原始特征
-        target_dim: 目标维度（必须小于 D）
-        train_idx: 训练节点索引，PCA仅在这些节点上拟合
-        random_state: PCA 随机种子，保证可复现
-
-    Returns:
-        [N, target_dim] 降维后特征
-    """
-    pca = PCA(n_components=target_dim, random_state=random_state)
-    train_np = features[train_idx].numpy()
-    pca.fit(train_np)
-    reduced = pca.transform(features.numpy())
-    return torch.from_numpy(reduced.astype(np.float32))
-
-
-def apply_svd(features: Tensor, target_dim: int, train_idx: Tensor, random_state: int = 0) -> Tensor:
-    """使用截断SVD对特征矩阵进行降维（不去中心化，直接做奇异值分解）。
-
-    与PCA的区别：PCA 先对数据去中心化（减均值）再 SVD，TruncatedSVD 直接对原始数据 SVD。
-    对于稀疏或非负特征，不做中心化可以保留数据结构。
-
-    Args:
-        features: [N, D] 原始特征
-        target_dim: 目标维度（必须小于 D）
-        train_idx: 训练节点索引，SVD仅在这些节点上拟合
-        random_state: 随机种子，保证可复现
-
-    Returns:
-        [N, target_dim] 降维后特征
-    """
-    svd = TruncatedSVD(n_components=target_dim, random_state=random_state)
-    train_np = features[train_idx].numpy()
-    svd.fit(train_np)
-    reduced = svd.transform(features.numpy())
-    return torch.from_numpy(reduced.astype(np.float32))
 
 
 def attach_splits(data: Data, bundle: DatasetBundle) -> None:
@@ -979,10 +902,11 @@ def train_once(args: argparse.Namespace, train_seed: int, bundle: DatasetBundle,
                 method.epoch = ep
 
             # grace_ML / MCNE 两阶段：进入第二阶段时切换学习率
-            if ((args.method == "grace_ml" or args.method in MCNE_METHODS
-                    or args.method == "pagcl_mcne")
-                    and args.grace_ml_lr is not None
-                    and ep == args.grace_only_epochs + 1):
+            if (
+                (args.method == "grace_ml" or args.method in MCNE_METHODS)
+                and args.grace_ml_lr is not None
+                and ep == args.grace_only_epochs + 1
+            ):
                 for pg in optimizer.param_groups:
                     pg["lr"] = float(args.grace_ml_lr)
                 logger.info(
@@ -1217,20 +1141,11 @@ def save_results(
 
     for item in eval_results:
         seed = item["eval_seed"]
-        pca_dim = item.get("pca_dim")
-        svd_dim = item.get("svd_dim")
-        if pca_dim is not None:
-            p = eval_dir / f"eval_seed{seed}_pca{pca_dim}.metrics.json"
-        elif svd_dim is not None:
-            p = eval_dir / f"eval_seed{seed}_svd{svd_dim}.metrics.json"
-        else:
-            p = eval_dir / f"eval_seed{seed}.metrics.json"
+        p = eval_dir / f"eval_seed{seed}.metrics.json"
         with open(p, "w", encoding="utf-8") as f:
             json.dump(item, f, ensure_ascii=False, indent=2)
 
-    # 主评估结果（不含PCA/SVD降维）
-    main_items = [x for x in eval_results if x.get("pca_dim") is None and x.get("svd_dim") is None]
-    acc_values = [float(x["test_metrics"]["accuracy"]) for x in main_items]
+    acc_values = [float(x["test_metrics"]["accuracy"]) for x in eval_results]
     stats = summarize_values(acc_values)
 
     # MRL维度统计
@@ -1247,42 +1162,6 @@ def save_results(
         dim_stats = summarize_values(mrl_dim_accuracy_values[dim_key])
         mrl_dim_accuracy_stats[dim_key] = {
             "values": mrl_dim_accuracy_values[dim_key],
-            "mean": dim_stats["mean"],
-            "variance": dim_stats["variance"],
-            "std": dim_stats["std"],
-            "mean_pm_variance": f"{dim_stats['mean']:.4f} ± {dim_stats['variance']:.6f}",
-        }
-
-    # PCA维度统计
-    pca_items = [x for x in eval_results if x.get("pca_dim") is not None]
-    pca_dim_accuracy_values: Dict[str, List[float]] = {}
-    for item in pca_items:
-        pca_dim = item["pca_dim"]
-        pca_dim_accuracy_values.setdefault(f"pca_{pca_dim}", []).append(float(item["test_metrics"]["accuracy"]))
-
-    pca_dim_accuracy_stats: Dict[str, Dict[str, Any]] = {}
-    for dim_key in sorted(pca_dim_accuracy_values.keys()):
-        dim_stats = summarize_values(pca_dim_accuracy_values[dim_key])
-        pca_dim_accuracy_stats[dim_key] = {
-            "values": pca_dim_accuracy_values[dim_key],
-            "mean": dim_stats["mean"],
-            "variance": dim_stats["variance"],
-            "std": dim_stats["std"],
-            "mean_pm_variance": f"{dim_stats['mean']:.4f} ± {dim_stats['variance']:.6f}",
-        }
-
-    # SVD维度统计
-    svd_items = [x for x in eval_results if x.get("svd_dim") is not None]
-    svd_dim_accuracy_values: Dict[str, List[float]] = {}
-    for item in svd_items:
-        svd_dim = item["svd_dim"]
-        svd_dim_accuracy_values.setdefault(f"svd_{svd_dim}", []).append(float(item["test_metrics"]["accuracy"]))
-
-    svd_dim_accuracy_stats: Dict[str, Dict[str, Any]] = {}
-    for dim_key in sorted(svd_dim_accuracy_values.keys()):
-        dim_stats = summarize_values(svd_dim_accuracy_values[dim_key])
-        svd_dim_accuracy_stats[dim_key] = {
-            "values": svd_dim_accuracy_values[dim_key],
             "mean": dim_stats["mean"],
             "variance": dim_stats["variance"],
             "std": dim_stats["std"],
@@ -1309,12 +1188,6 @@ def save_results(
         summary["mrl_dims"] = parse_dims(args.mrl_dims)
     if mrl_dim_accuracy_stats:
         summary["mrl_dim_accuracy_stats"] = mrl_dim_accuracy_stats
-    if pca_dim_accuracy_stats:
-        summary["pca_dims"] = parse_dims(getattr(args, "pca_dims", ""))
-        summary["pca_dim_accuracy_stats"] = pca_dim_accuracy_stats
-    if svd_dim_accuracy_stats:
-        summary["svd_dims"] = parse_dims(getattr(args, "svd_dims", ""))
-        summary["svd_dim_accuracy_stats"] = svd_dim_accuracy_stats
     summary_json = run_dir / "summary.json"
     with open(summary_json, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -1330,13 +1203,6 @@ def save_results(
                     f"{mrl_dim_accuracy_stats[dim_key]['mean']:.4f} +- "
                     f"{mrl_dim_accuracy_stats[dim_key]['variance']:.6f}\n"
                 )
-        if pca_dim_accuracy_stats:
-            for dim_key in sorted(pca_dim_accuracy_stats.keys()):
-                f.write(
-                    f"{dataset}-{method}-{dim_key}: "
-                    f"{pca_dim_accuracy_stats[dim_key]['mean']:.4f} +- "
-                    f"{pca_dim_accuracy_stats[dim_key]['variance']:.6f}\n"
-                )
     logger.info("结果保存: %s", str(summary_json))
     dataset_dir = run_dir.parent.parent
     dataset_summary = dataset_dir / "accuracy_summary.txt"
@@ -1350,13 +1216,6 @@ def save_results(
                     f"{method}_{dim_key}: "
                     f"{mrl_dim_accuracy_stats[dim_key]['mean']:.4f} +- "
                     f"{mrl_dim_accuracy_stats[dim_key]['variance']:.6f}\n"
-                )
-        if pca_dim_accuracy_stats:
-            for dim_key in sorted(pca_dim_accuracy_stats.keys()):
-                f.write(
-                    f"{method}_{dim_key}: "
-                    f"{pca_dim_accuracy_stats[dim_key]['mean']:.4f} +- "
-                    f"{pca_dim_accuracy_stats[dim_key]['variance']:.6f}\n"
                 )
         f.write("\n")
 
@@ -1372,7 +1231,7 @@ def save_results(
 def parse_args() -> argparse.Namespace:
     """解析参数。"""
     p = argparse.ArgumentParser(
-        description="统一训练：GCN、DGI、CCA-SSG、SSGE、GRACE、GraphCL 与 PaGCL",
+        description="统一训练：监督 GCN 与多种图自监督表示学习方法",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     p.add_argument(
@@ -1389,12 +1248,9 @@ def parse_args() -> argparse.Namespace:
             "mcne",
             "mcne_no_cdmd",
             "mcne_no_hpem",
-            "mcne_no_das",
+            "mcne_no_dals",
             "ssge",
             "graphcl",
-            "pagcl",
-            "pagcl_mrl",
-            "pagcl_mcne",
         ],
     )
     p.add_argument("--dataset", type=str, required=True, choices=["arxiv", "reddit2", "products", "mag"])
@@ -1410,7 +1266,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run-dims", type=str, default=None,
                    help="依次独立训练多个维度，例如 32,64,128,256,384,512,768")
     p.add_argument("--dropout", type=float, default=0.5)
-    p.add_argument("--proj-dim", type=int, default=256, help="GraphCL/PaGCL 投影维度；GRACE 不使用投影头")
     p.add_argument("--tau", type=float, default=0.5, help="GRACE 温度系数")
     p.add_argument("--lam", type=float, default=1e-3, help="CCA-SSG λ")
 
@@ -1466,18 +1321,16 @@ def parse_args() -> argparse.Namespace:
                    help="关闭 CDMD；可与其他消融开关组合")
     p.add_argument("--disable-hpem", dest="use_hpem", action="store_false", default=True,
                    help="关闭 HPEM；此时自动以标准 GRACE+MRL InfoNCE 替代")
-    p.add_argument("--disable-das", dest="use_das", action="store_false", default=True,
-                   help="关闭 DAS；HPEM 各维损失改为等权")
+    p.add_argument("--disable-dals", dest="use_dals", action="store_false", default=True,
+                   help="关闭 DALS；HPEM 使用固定 τ_0 且各维损失等权")
     p.add_argument("--hpem-beta-init", type=float, default=0.1,
                    help="HPEM 的 β 参数初始值（可学习）")
-    p.add_argument("--hpem-tau-0", type=float, default=0.5,
-                   help="HPEM 基础温度 τ_0")
-
-    p.add_argument("--pca-dims", type=str, default=None,
-                   help="PCA基线：逗号分隔的目标维度，例如 32,64,128。训练hidden_dim后PCA降维并评估每维度5次")
-
-    p.add_argument("--svd-dims", type=str, default=None,
-                   help="SVD基线：逗号分隔的目标维度，例如 32,64,128。使用TruncatedSVD（不去中心化）降维并评估每维度5次")
+    p.add_argument("--hpem-tau-0", type=float, default=None,
+                   help="HPEM/DALS 基础温度 τ_0；默认沿用 --tau")
+    p.add_argument("--hpem-phi-1-init", type=float, default=0.0,
+                   help="维度自适应温度参数 φ_1 的初始值")
+    p.add_argument("--hpem-phi-2-init", type=float, default=0.0,
+                   help="维度自适应温度参数 φ_2 的初始值")
 
     # ---- GraphCL 特有参数 ----
     graphcl_aug_choices = sorted(["none", "node_drop", "edge_perturb", "subgraph", "attr_mask", "random"])
@@ -1493,33 +1346,8 @@ def parse_args() -> argparse.Namespace:
                    help="第二视图增强强度，范围 [0,1)")
     p.add_argument("--graphcl-symmetric-loss", action="store_true", default=False,
                    help="使用双向 GraphCL 损失；默认关闭以贴近原仓库 loss_cal")
-    # ---- PaGCL (KDD 2025) ----
-    p.add_argument("--pagcl-tau", type=float, default=0.5,
-                   help="PaGCL Eq.(9)-(11) cosine-distance temperature")
-    p.add_argument("--pagcl-rho", type=float, default=1.0,
-                   help="PaGCL variant/negative objective weight rho")
-    p.add_argument("--pagcl-sequence-length", type=int, default=2,
-                   help="Number of progressive augmentation steps (number of views is L+1)")
-    pagcl_aug_choices = sorted([
-        "none", "edge_perturb", "node_drop", "feature_mask", "graph_sampling", "random"
-    ])
-    p.add_argument("--pagcl-augmentation", type=str, default="edge_perturb",
-                   choices=pagcl_aug_choices,
-                   help="Augmentation repeatedly applied to the preceding PaGCL view")
-    p.add_argument("--pagcl-augmentation-ratio", type=float, default=0.2,
-                   help="Per-step progressive augmentation ratio")
-    p.add_argument("--pagcl-temporal-eta", type=float, default=0.3,
-                   help="Temporal aggregation coefficient eta in PaGCL Sec. 3.3")
-    p.add_argument("--pagcl-time-frequencies", type=int, default=16,
-                   help="Number of learnable Fourier frequencies in the time encoder")
-    p.add_argument("--pagcl-time-mode", type=str, default="change",
-                   choices=["change", "index"],
-                   help="Scalable OGB timestamp: feature/degree change proxy or step index")
-    p.add_argument("--pagcl-mcne-weight", type=float, default=1.0,
-                   help="Weight of the adjacent-view MCNE regularizer in PaGCL-MCNE")
-
     p.add_argument("--eval-only", action="store_true",
-                   help="仅评估模式：跳过训练，直接从 --checkpoint 加载模型进行PCA/标准评估")
+                   help="仅评估模式：跳过训练，直接从 --checkpoint 加载模型进行标准评估")
     p.add_argument("--checkpoint", type=str, default=None,
                    help="eval-only 模式下使用的 checkpoint 路径")
 
@@ -1601,8 +1429,7 @@ def main() -> None:
             args.grace_only_epochs = goe
             args.grace_ml_epochs = gme
             args.pretrain_epochs = goe + gme
-        elif (args.method == "grace_ml" or args.method in MCNE_METHODS
-              or args.method == "pagcl_mcne"):
+        elif args.method == "grace_ml" or args.method in MCNE_METHODS:
             args.grace_only_epochs = args.pretrain_epochs // 2
             args.grace_ml_epochs = args.pretrain_epochs - args.grace_only_epochs
 
@@ -1631,8 +1458,6 @@ def main() -> None:
             logger.info("EvalOnly模式 | checkpoint=%s | result_dir=%s", str(checkpoint_path), str(result_dir))
             train_meta = {"method": args.method, "output_dim": int(args.hidden_dim), "checkpoint_path": str(checkpoint_path)}
         else:
-            if args.pca_dims and not args.checkpoint:
-                pass  # 正常训练+PCA流程
             ckpt_dir, result_dir = build_run_dirs(args)
             logger = setup_logger(args.log_level, log_file=result_dir / "run.log")
             logger.info("CheckpointDir=%s", str(ckpt_dir))
@@ -1813,106 +1638,6 @@ def main() -> None:
                 if mrl_dim_test_accuracy:
                     result["mrl_dim_test_accuracy"] = mrl_dim_test_accuracy
                 eval_results.append(result)
-
-            # PCA基线评估：训练hidden_dim后PCA降维，每维度5次评估
-            pca_dims_str = getattr(args, "pca_dims", None)
-            if pca_dims_str and not method.is_supervised:
-                pca_dims = parse_dims(pca_dims_str)
-                for pca_dim in pca_dims:
-                    if pca_dim >= int(method.output_dim()):
-                        logger.warning("PCA目标维度 %d >= 原始维度 %d，跳过", pca_dim, int(method.output_dim()))
-                        continue
-                    logger.info("%s PCA降维到 %d %s", "=" * 20, pca_dim, "=" * 20)
-                    pca_features = apply_pca(features, pca_dim, bundle.train_idx.cpu())
-                    for seed in eval_seeds:
-                        logger.info("PCA_dim=%d | eval_seed=%d", pca_dim, int(seed))
-                        set_seed(int(seed))
-                        pca_clf, _ = run_linear_eval_with_fallback(
-                            features=pca_features,
-                            labels=data.y.cpu(),
-                            train_idx=bundle.train_idx.cpu(),
-                            val_idx=bundle.val_idx.cpu(),
-                            num_classes=bundle.num_classes,
-                            prefer_device=actual_infer_device,
-                            epochs=args.cls_epochs,
-                            lr=args.cls_lr,
-                            weight_decay=args.cls_weight_decay,
-                            batch_size=args.cls_batch_size,
-                            logger=logger,
-                            early_stop=bool(args.cls_early_stop),
-                            patience=int(args.cls_patience),
-                            min_delta=float(args.cls_min_delta),
-                        )
-                        pca_val_pred = predict_on_index(pca_clf, pca_features, bundle.val_idx.cpu(), actual_infer_device, args.cls_batch_size)
-                        pca_test_pred = predict_on_index(pca_clf, pca_features, bundle.test_idx.cpu(), actual_infer_device, args.cls_batch_size)
-                        pca_val_labels = data.y[bundle.val_idx].cpu().numpy()
-                        pca_test_labels = data.y[bundle.test_idx].cpu().numpy()
-                        pca_val_metrics = compute_metrics(pca_val_pred, pca_val_labels)
-                        pca_test_metrics = compute_metrics(pca_test_pred, pca_test_labels)
-                        pca_result: Dict[str, Any] = {
-                            "eval_seed": int(seed),
-                            "method": method.method_name,
-                            "dataset": args.dataset,
-                            "hidden_dim": int(args.hidden_dim),
-                            "num_layers": int(args.num_layers),
-                            "output_dim": pca_dim,
-                            "pca_dim": pca_dim,
-                            "pca_from_dim": int(method.output_dim()),
-                            "val_metrics": pca_val_metrics,
-                            "test_metrics": pca_test_metrics,
-                            "checkpoint_path": str(checkpoint_path),
-                        }
-                        eval_results.append(pca_result)
-
-            # SVD基线评估：使用TruncatedSVD（不去中心化）降维，每维度5次评估
-            svd_dims_str = getattr(args, "svd_dims", None)
-            if svd_dims_str and not method.is_supervised:
-                svd_dims = parse_dims(svd_dims_str)
-                for svd_dim in svd_dims:
-                    if svd_dim >= int(method.output_dim()):
-                        logger.warning("SVD目标维度 %d >= 原始维度 %d，跳过", svd_dim, int(method.output_dim()))
-                        continue
-                    logger.info("%s SVD降维到 %d %s", "=" * 20, svd_dim, "=" * 20)
-                    svd_features = apply_svd(features, svd_dim, bundle.train_idx.cpu())
-                    for seed in eval_seeds:
-                        logger.info("SVD_dim=%d | eval_seed=%d", svd_dim, int(seed))
-                        set_seed(int(seed))
-                        svd_clf, _ = run_linear_eval_with_fallback(
-                            features=svd_features,
-                            labels=data.y.cpu(),
-                            train_idx=bundle.train_idx.cpu(),
-                            val_idx=bundle.val_idx.cpu(),
-                            num_classes=bundle.num_classes,
-                            prefer_device=actual_infer_device,
-                            epochs=args.cls_epochs,
-                            lr=args.cls_lr,
-                            weight_decay=args.cls_weight_decay,
-                            batch_size=args.cls_batch_size,
-                            logger=logger,
-                            early_stop=bool(args.cls_early_stop),
-                            patience=int(args.cls_patience),
-                            min_delta=float(args.cls_min_delta),
-                        )
-                        svd_val_pred = predict_on_index(svd_clf, svd_features, bundle.val_idx.cpu(), actual_infer_device, args.cls_batch_size)
-                        svd_test_pred = predict_on_index(svd_clf, svd_features, bundle.test_idx.cpu(), actual_infer_device, args.cls_batch_size)
-                        svd_val_labels = data.y[bundle.val_idx].cpu().numpy()
-                        svd_test_labels = data.y[bundle.test_idx].cpu().numpy()
-                        svd_val_metrics = compute_metrics(svd_val_pred, svd_val_labels)
-                        svd_test_metrics = compute_metrics(svd_test_pred, svd_test_labels)
-                        svd_result: Dict[str, Any] = {
-                            "eval_seed": int(seed),
-                            "method": method.method_name,
-                            "dataset": args.dataset,
-                            "hidden_dim": int(args.hidden_dim),
-                            "num_layers": int(args.num_layers),
-                            "output_dim": svd_dim,
-                            "svd_dim": svd_dim,
-                            "svd_from_dim": int(method.output_dim()),
-                            "val_metrics": svd_val_metrics,
-                            "test_metrics": svd_test_metrics,
-                            "checkpoint_path": str(checkpoint_path),
-                        }
-                        eval_results.append(svd_result)
 
         save_results(run_dir=result_dir, args=args, train_meta=train_meta, eval_results=eval_results, logger=logger)
 

@@ -66,9 +66,6 @@ PyAGC 是一个基于 **PyTorch** 与 **PyTorch Geometric** 的属性图聚类�
 - `grace_ml` - GRACE + MRL + cross-dimensional mutual learning
 - `mcne` - GRACE + MRL + CDMD + HPEM + DALS
 - `graphcl` - GraphCL 的大图节点级 NeighborLoader 适配
-- `pagcl` - KDD 2025 PaGCL 渐进增强与时空不变性学习的大图节点级适配
-- `pagcl_mrl` - PaGCL + MRL
-- `pagcl_mcne` - PaGCL + MRL，并在相邻渐进视图上加入 MCNE
 - `ssge` - SSGE
 
 脚本特性：
