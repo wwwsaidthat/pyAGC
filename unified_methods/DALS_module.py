@@ -38,16 +38,16 @@ class DALSScheduler(nn.Module):
         w_i = dals.get_hpem_weight(256)  # exp(λ · 256/768)
     """
 
-    def __init__(self, max_dim: int = 768):
+    def __init__(self, max_dim: int = 768, lambda_init: float = 0.0):
         """
         参数:
             max_dim: 最大维度 d_K，用于归一化 d_i / d_K
+            lambda_init: λ 的初始值
         """
         super().__init__()
         self.max_dim = int(max_dim)
 
-        # λ：初始化为 0 → 所有维度等权
-        self.lam = nn.Parameter(torch.tensor(0.0))
+        self.lam = nn.Parameter(torch.tensor(float(lambda_init)))
 
     def _normalized_dim(self, dim: int) -> float:
         return dim / self.max_dim

@@ -670,6 +670,7 @@ def build_method(args: argparse.Namespace, in_dim: int, num_classes: int) -> Bas
             hpem_tau_0=args.hpem_tau_0,
             hpem_phi_1_init=args.hpem_phi_1_init,
             hpem_phi_2_init=args.hpem_phi_2_init,
+            dals_lambda_init=args.dals_lambda_init,
             use_cdmd=use_cdmd,
             use_hpem=use_hpem,
             use_dals=use_dals,
@@ -1331,6 +1332,8 @@ def parse_args() -> argparse.Namespace:
                    help="维度自适应温度参数 φ_1 的初始值")
     p.add_argument("--hpem-phi-2-init", type=float, default=0.0,
                    help="维度自适应温度参数 φ_2 的初始值")
+    p.add_argument("--dals-lambda-init", type=float, default=0.0,
+                   help="DALS 可学习参数 λ 的初始值")
 
     # ---- GraphCL 特有参数 ----
     graphcl_aug_choices = sorted(["none", "node_drop", "edge_perturb", "subgraph", "attr_mask", "random"])

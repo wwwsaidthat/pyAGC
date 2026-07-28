@@ -60,7 +60,7 @@ class MCNEMethod(GRACEWithMRLMethod):
         use_dals: bool = True,
         ablation_name: str = "mcne",
         # DALS
-        # （无额外参数，λ 自动初始化为 0）
+        dals_lambda_init: float = 0.0,
         # 训练阶段
         warmup_epochs: int = 100,
         full_epochs: int = 100,
@@ -110,7 +110,10 @@ class MCNEMethod(GRACEWithMRLMethod):
         )
 
         # ---- DALS 模块（仅 HPEM 损失权重 w_i = exp(λ·d_i/d_n)）----
-        self.dals = DALSScheduler(max_dim=max_dim)
+        self.dals = DALSScheduler(
+            max_dim=max_dim,
+            lambda_init=dals_lambda_init,
+        )
 
         # ---- epoch 计数器 ----
         self.epoch = 0
